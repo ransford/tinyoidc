@@ -1,0 +1,32 @@
+# Dex configured as a local OpenID Provider for testing tinyoidc (the RP).
+# Run it with dev/dex/run.sh. Nothing here is a real secret.
+
+# Must match, byte for byte, the `iss` claim tinyoidc will check and the URL
+# tinyoidc fetches discovery from. Both the browser and the RP reach Dex at
+# this address, so localhost works for both.
+issuer: http://localhost:5556/dex
+
+storage:
+  type: memory   # wiped on restart; that's the point
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  # Flip to false to exercise the consent screen (and the access_denied path).
+  skipApprovalScreen: true
+
+staticClients:
+  - id: tinyoidc
+    name: tinyoidc dev
+    secret: tinyoidc-dev-secret
+    redirectURIs:
+      - http://localhost:8080/auth/callback
+
+enablePasswordDB: true
+staticPasswords:
+  - email: alice@example.com
+    username: alice
+    userID: 08a8684b-db88-4b73-90a9-3cd1661f5466
+    # bcrypt of "password"
+    hash: "$2y$10$HuPu5BZMO4DNcvs/iIW6LeghHX1N9ixBt6HTOEXZ0cghL42kHHnNS"

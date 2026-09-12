@@ -39,16 +39,16 @@ func tokenHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type oidcConfiguration struct {
-	authzEndpoint string `json:"authz_endpoint"`
-	tokenEndpoint string `json:"token_endpoint"`
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint"`
 }
 
 func wellKnownHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	conf := oidcConfiguration{
-		authzEndpoint: "foo",
-		tokenEndpoint: "bar",
+		AuthorizationEndpoint: "foo",
+		TokenEndpoint:         "bar",
 	}
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(conf)
