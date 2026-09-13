@@ -1,14 +1,11 @@
 package tinyoidc
 
 import (
-	"context"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"math/big"
-	"net/http"
 	"time"
 )
 
@@ -28,20 +25,11 @@ type Jwk struct {
 const jwksRefetchInterval = time.Minute
 
 func fetchJwks(uri string) (*Jwks, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := getWithTimeout(uri, 5*time.Second)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch jwks: %s", resp.Status)
-	}
 	jwks := &Jwks{}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(jwks); err != nil {
 		return nil, err

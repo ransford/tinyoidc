@@ -1,9 +1,12 @@
 package tinyoidc
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // isLocalPath reports whether next is a path on this site, and so safe to redirect to
@@ -37,4 +40,22 @@ func isNavigation(r *http.Request) bool {
 	// No Sec-Fetch-*: an older browser or a non-browser client. Only an explicit
 	// text/html counts; curl's default */* does not.
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+func getWithTimeout(uri string, timeout time.Duration) (*http.Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("fetch jwks: %s", resp.Status)
+	}
+	return resp, nil
 }

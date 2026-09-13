@@ -427,25 +427,33 @@ func (o *OidcRelyingParty) TidyForever() {
 	}
 }
 
-func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
-	mux := http.NewServeMux()
-
-	// Get OIDC configuration from SP
-	oidcConfigUrl := fmt.Sprintf("%s/.well-known/openid-configuration", DEV_ISSUER_URL)
-	slog.Info("fetching", "url", oidcConfigUrl)
-	resp, err := http.Get(oidcConfigUrl)
+func fetchOidcConfig(uri string) (*OpenIDConfig, error) {
+	resp, err := getWithTimeout(uri, 5*time.Second)
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 	j := json.NewDecoder(resp.Body)
 	conf := OpenIDConfig{}
 	if err := j.Decode(&conf); err != nil {
 		return nil, err
 	}
-	slog.Info("fetched", "url", oidcConfigUrl)
 	slog.Debug("issuer", "metadata", conf)
 	if conf.Issuer != DEV_ISSUER_URL {
 		return nil, fmt.Errorf("wrong issuer url")
+	}
+
+	return &conf, nil
+}
+
+func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
+	mux := http.NewServeMux()
+
+	// Get OIDC configuration from SP
+	oidcConfigUrl := fmt.Sprintf("%s/.well-known/openid-configuration", DEV_ISSUER_URL)
+	conf, err := fetchOidcConfig(oidcConfigUrl)
+	if err != nil {
+		return nil, err
 	}
 
 	slog.Debug("fetching jwks", "jwks_uri", conf.JwksUri)
@@ -462,7 +470,7 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		clientSecret:      DEV_CLIENT_SECRET,
 		redirectUri:       fmt.Sprintf("http://localhost:%d/auth/callback", DEFAULT_PORT),
 		scopes:            []string{"openid", "email"},
-		fetchedOidcConfig: &conf,
+		fetchedOidcConfig: conf,
 		jwks:              jwks,
 		jwksFetched:       time.Now(),
 
