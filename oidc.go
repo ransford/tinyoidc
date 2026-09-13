@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -40,8 +42,9 @@ type OidcRelyingParty struct {
 	fetchedOidcConfig *OpenIDConfig
 	jwks              *Jwks
 
-	mu       sync.Mutex
-	sessions map[string]*ClientCookie
+	mu              sync.Mutex
+	pendingSessions map[string]*ClientCookie
+	activeSessions  map[string]*ActiveSession
 }
 
 type ClientCookie struct {
@@ -53,6 +56,11 @@ type ClientCookie struct {
 	Next string `json:"next"`
 
 	created time.Time
+}
+
+type ActiveSession struct {
+	Username string `json:"username"`
+	created  time.Time
 }
 
 type TokenResponse struct {
@@ -129,9 +137,9 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	}
 
 	o.mu.Lock()
-	session, ok := o.sessions[state]
+	session, ok := o.pendingSessions[state]
 	if ok {
-		delete(o.sessions, state)
+		delete(o.pendingSessions, state)
 	}
 	o.mu.Unlock()
 	if !ok {
@@ -223,6 +231,7 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		w.Write([]byte(`"error: validate JWT"`))
 		return
 	}
+	slog.Debug("JWT claims", "claims", claims)
 	if claims.Nonce != session.Nonce { /* 401 */
 		slog.Error("callback error: nonce mismatch")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -241,11 +250,42 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		w.Write([]byte(`"error: empty subject"`))
 		return
 	}
-	// user identity = (claims.Issuer, claims.Subject)
-	slog.Info("logged in", "issuer", claims.Issuer, "subject", claims.Subject)
+	if claims.Email != "" && !claims.EmailVerified {
+		slog.Error("callback error: unverified email")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`"error: unverified email"`))
+		return
+	}
+
+	slog.Info("logged in", "email", claims.Email)
+
+	sessionId := uuid.New().String()
+
+	o.mu.Lock()
+	o.activeSessions[sessionId] = &ActiveSession{
+		Username: claims.Email,
+		created:  time.Now(),
+	}
+	o.mu.Unlock()
+
+	expiration := claims.ExpiresAt.Time.Sub(time.Now()).Seconds()
+	sessionCookie := http.Cookie{
+		Name:     "__Host-tinyoidc_session",
+		Value:    sessionId,
+		Path:     "/",
+		MaxAge:   int(math.Round(expiration)),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	}
+
+	// Use the http.SetCookie() function to send the cookie to the client.
+	// Behind the scenes this adds a `Set-Cookie` header to the response
+	// containing the necessary cookie data.
+	http.SetCookie(w, &sessionCookie)
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status": "got access token"}`))
+	w.Write([]byte(fmt.Sprintf(`{"status": "logged in", "email": "%s"}`, claims.Email)))
 }
 
 func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) {
@@ -277,7 +317,7 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 		created: time.Now(),
 	}
 	o.mu.Lock()
-	o.sessions[stateStr] = &cookieVal
+	o.pendingSessions[stateStr] = &cookieVal
 	slog.Debug("wrote session", "key", stateStr)
 	o.mu.Unlock()
 
@@ -317,13 +357,13 @@ func (o *OidcRelyingParty) TidyForever() {
 	for {
 		o.mu.Lock()
 		deletions := []string{}
-		for s, c := range o.sessions {
+		for s, c := range o.pendingSessions {
 			if time.Since(c.created) > 10*time.Minute {
 				deletions = append(deletions, s)
 			}
 		}
 		for _, d := range deletions {
-			delete(o.sessions, d)
+			delete(o.pendingSessions, d)
 		}
 		o.mu.Unlock()
 		slog.Debug("tidied", "num_sessions", len(deletions))
@@ -401,7 +441,8 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		fetchedOidcConfig: &conf,
 		jwks:              &parsedJwks,
 
-		sessions: make(map[string]*ClientCookie),
+		pendingSessions: make(map[string]*ClientCookie),
+		activeSessions:  make(map[string]*ActiveSession),
 	}
 
 	mux.Handle("/login", http.HandlerFunc(rp.loginHandler))

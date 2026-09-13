@@ -74,19 +74,19 @@ Target shape:
 - [x] Fetch JWKS from `jwks_uri`; cache it.
 - [ ] On an unknown `kid`, re-fetch once — keys rotate — but rate-limit that path so a bogus
       token can't turn into a request flood.
-- [ ] Select the key by `kid`. Choose the algorithm from the discovery document's supported
+- [x] Select the key by `kid`. Choose the algorithm from the discovery document's supported
       list; **never** take direction from the token's own `alg` header. Reject `none` and
       reject HMAC algorithms outright.
-- [ ] Verify the signature. Use `go-jose/v4` or `lestrrat-go/jwx/v3` for this — write the
+- [x] Verify the signature. Use `go-jose/v4` or `lestrrat-go/jwx/v3` for this — write the
       protocol yourself, not the crypto.
-- [ ] Claim checks, all of them:
-  - [ ] `iss` string-equals the discovery `issuer`
-  - [ ] `aud` contains our `client_id`
-  - [ ] `azp` equals our `client_id` when `aud` has more than one value
-  - [ ] `exp` in the future, `iat` sane, small clock-skew allowance (~1–2 min), skew applied
+- [x] Claim checks, all of them:
+  - [x] `iss` string-equals the discovery `issuer`
+  - [x] `aud` contains our `client_id`
+  - [x] `azp` equals our `client_id` when `aud` has more than one value
+  - [x] `exp` in the future, `iat` sane, small clock-skew allowance (~1–2 min), skew applied
         in both directions
-  - [ ] `nonce` equals the stored nonce
-  - [ ] `sub` present and non-empty
+  - [x] `nonce` equals the stored nonce
+  - [x] `sub` present and non-empty
 - [ ] Table-driven tests with deliberately broken tokens: expired, `alg: none`, HMAC signed
       with the RSA public key as the secret, wrong `aud`, wrong `iss`, wrong `nonce`, unknown
       `kid`, tampered payload, missing `sub`. **Each must fail.** This is the highest-value
@@ -94,11 +94,11 @@ Target shape:
 
 ## Slice 5 — session and middleware
 
-- [ ] Identity key is the pair `(iss, sub)`. Not email. Write down why in a comment.
-- [ ] If using `email`, require `email_verified == true`.
-- [ ] Mint an application session independent of the ID token — signed or encrypted cookie,
+- [x] Identity key is the pair `(iss, sub)`. Not email. Write down why in a comment.
+- [x] If using `email`, require `email_verified == true`.
+- [x] Mint an application session independent of the ID token — signed or encrypted cookie,
       or an opaque ID against a server-side store. The ID token is a door check, not a wristband.
-- [ ] Cookie flags: `HttpOnly`, `Secure`, `SameSite=Lax` (`Strict` breaks the callback),
+- [x] Cookie flags: `HttpOnly`, `Secure`, `SameSite=Lax` (`Strict` breaks the callback),
       `Path=/`, explicit `Max-Age`. Consider the `__Host-` prefix.
 - [ ] `Middleware`: session present and valid → put claims in the request `Context` and call
       the next handler. Otherwise → stash the destination and redirect to `/auth/login`.
