@@ -26,6 +26,8 @@ const DEFAULT_PORT uint16 = 8192
 const DEV_ISSUER_URL = "http://localhost:5556/dex"
 const DEV_CLIENT_ID = "tinyoidc"
 const DEV_CLIENT_SECRET = "tinyoidc-dev-secret"
+const STATE_COOKIE_NAME = "__Host-tinyoidc_state"
+const SESSION_COOKIE_NAME = "__Host-tinyoidc_session"
 
 type OidcRelyingParty struct {
 	mux *http.ServeMux
@@ -39,9 +41,11 @@ type OidcRelyingParty struct {
 
 	fetchedOidcConfig *OpenIDConfig
 
-	mu              sync.Mutex
-	jwks            *Jwks
-	jwksFetched     time.Time // last JWKS fetch attempt, successful or not
+	mu          sync.Mutex
+	jwks        *Jwks
+	jwksFetched time.Time // last JWKS fetch attempt, successful or not
+
+	// Storage for pending and active sessions
 	pendingSessions map[string]*ClientCookie
 	activeSessions  map[string]*ActiveSession
 }
@@ -59,8 +63,9 @@ type ClientCookie struct {
 
 type ActiveSession struct {
 	Username string `json:"username"`
-	created  time.Time
 	claims   *IDTokenClaims
+
+	created time.Time
 }
 
 type TokenResponse struct {
@@ -159,7 +164,7 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 
 	// Check that the state is present and state matches cookie so it can't be reused
 	state := params.Get("state")
-	cookie, err := r.Cookie("__Host-tinyoidc_state")
+	cookie, err := r.Cookie(STATE_COOKIE_NAME)
 	if err != nil {
 		slog.Error("callback error", "missing state cookie", state)
 		w.WriteHeader(http.StatusBadRequest)
@@ -234,7 +239,7 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 
 	// Delete the state cookie so it can't be reused
 	http.SetCookie(w, &http.Cookie{
-		Name:     "__Host-tinyoidc_state",
+		Name:     STATE_COOKIE_NAME,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
@@ -268,26 +273,21 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	o.mu.Lock()
 	o.activeSessions[sessionId] = &ActiveSession{
 		Username: claims.Email,
-		created:  time.Now(),
 		claims:   claims,
+		created:  time.Now(),
 	}
 	o.mu.Unlock()
 
 	expiration := claims.ExpiresAt.Time.Sub(time.Now()).Seconds()
-	sessionCookie := http.Cookie{
-		Name:     "__Host-tinyoidc_session",
+	http.SetCookie(w, &http.Cookie{
+		Name:     SESSION_COOKIE_NAME,
 		Value:    sessionId,
 		Path:     "/",
 		MaxAge:   int(math.Round(expiration)),
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
-	}
-
-	// Use the http.SetCookie() function to send the cookie to the client.
-	// Behind the scenes this adds a `Set-Cookie` header to the response
-	// containing the necessary cookie data.
-	http.SetCookie(w, &sessionCookie)
+	})
 
 	// Re-check the destination even though loginHandler validated it before storing.
 	next := session.Next
@@ -302,7 +302,7 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request) {
 	var sessionId string
 
-	cookie, err := r.Cookie("__Host-tinyoidc_session")
+	cookie, err := r.Cookie(SESSION_COOKIE_NAME)
 	if err != nil {
 		slog.Error("logout: invalid session")
 		http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -328,7 +328,7 @@ func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     "__Host-tinyoidc_session",
+		Name:     SESSION_COOKIE_NAME,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
@@ -339,22 +339,6 @@ func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request)
 
 	slog.Info("logout", "username", u, "after", dur)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
-// isLocalPath reports whether next is a path on this site, and so safe to redirect to
-// after login. Anything else is a potential open redirect.
-func isLocalPath(next string) bool {
-	// "//evil" and "/\\evil" are scheme-relative URLs to browsers.
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.ContainsAny(next, "\\") {
-		return false
-	}
-	for _, c := range next {
-		if c < 0x20 || c == 0x7f {
-			return false
-		}
-	}
-	u, err := url.Parse(next)
-	return err == nil && u.Scheme == "" && u.Host == ""
 }
 
 func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) {
@@ -396,7 +380,7 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	o.mu.Unlock()
 
 	cookie := http.Cookie{
-		Name:     "__Host-tinyoidc_state",
+		Name:     STATE_COOKIE_NAME,
 		Value:    stateStr,
 		Path:     "/",
 		MaxAge:   600,
@@ -512,23 +496,6 @@ func (o *OidcRelyingParty) Handler() http.Handler {
 
 type claimsContextKey struct{}
 
-// isNavigation reports whether r is a browser loading a page, as opposed to fetch/XHR,
-// a subresource, or an API client. Only navigations should be sent through a login flow:
-// fetch() would silently follow the redirect to the OP's HTML and fail on CORS.
-func isNavigation(r *http.Request) bool {
-	// A redirected POST loses its body, so only GET and HEAD can resume after login.
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		return false
-	}
-	// Browsers set Sec-Fetch-* themselves and scripts can't forge it.
-	if mode := r.Header.Get("Sec-Fetch-Mode"); mode != "" {
-		return mode == "navigate" && r.Header.Get("Sec-Fetch-Dest") == "document"
-	}
-	// No Sec-Fetch-*: an older browser or a non-browser client. Only an explicit
-	// text/html counts; curl's default */* does not.
-	return strings.Contains(r.Header.Get("Accept"), "text/html")
-}
-
 // Middleware passes requests with a valid session through to next, with the
 // session's ID token claims in the request context. Otherwise, navigations are
 // redirected to /auth/login and everything else gets a 401.
@@ -561,7 +528,7 @@ func (o *OidcRelyingParty) Middleware(next http.Handler) http.Handler {
 // Claims returns the ID token claims for the request's session, if it has a valid
 // one. Unlike Middleware it never redirects, so public pages can use it too.
 func (o *OidcRelyingParty) Claims(r *http.Request) (*IDTokenClaims, bool) {
-	cookie, err := r.Cookie("__Host-tinyoidc_session")
+	cookie, err := r.Cookie(SESSION_COOKIE_NAME)
 	if err != nil {
 		return nil, false
 	}
