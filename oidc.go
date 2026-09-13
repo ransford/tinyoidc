@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -198,7 +197,7 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
@@ -220,35 +219,17 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 
 	client := &http.Client{}
 	resp, err := client.Do(fetchToken)
-	if err != nil {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		slog.Error("callback error: fetch token")
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`"error: fetch token"`))
 		return
 	}
-	defer resp.Body.Close() // Always close the body to prevent memory leaks
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		slog.Error("callback error: read token")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`"error: read token"`))
-		return
-	}
-
-	// Delete the state cookie so it can't be reused
-	http.SetCookie(w, &http.Cookie{
-		Name:     STATE_COOKIE_NAME,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		Expires:  time.Unix(0, 0),
-		HttpOnly: true,
-		Secure:   true,
-	})
+	defer resp.Body.Close()
 
 	// Do something with the access token
 	tokenResponse := TokenResponse{}
-	if err := json.Unmarshal(body, &tokenResponse); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tokenResponse); err != nil {
 		slog.Error("callback error: parse token")
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`"error: parse token"`))
@@ -267,6 +248,17 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 
 	slog.Info("logged in", "email", claims.Email)
 
+	// Delete the state cookie so it can't be reused
+	http.SetCookie(w, &http.Cookie{
+		Name:     STATE_COOKIE_NAME,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+		HttpOnly: true,
+		Secure:   true,
+	})
+
 	sessionId := uuid.New().String()
 	o.mu.Lock()
 	o.activeSessions[sessionId] = &ActiveSession{
@@ -276,12 +268,11 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	}
 	o.mu.Unlock()
 
-	expiration := claims.ExpiresAt.Time.Sub(time.Now()).Seconds()
 	http.SetCookie(w, &http.Cookie{
 		Name:     SESSION_COOKIE_NAME,
 		Value:    sessionId,
 		Path:     "/",
-		MaxAge:   int(math.Round(expiration)),
+		MaxAge:   int(time.Until(claims.ExpiresAt.Time).Seconds()),
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
@@ -409,20 +400,34 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, baseUrl.String(), http.StatusFound)
 }
 
-func (o *OidcRelyingParty) TidyForever() {
+func (o *OidcRelyingParty) tidyForever() {
 	for {
 		o.mu.Lock()
-		deletions := []string{}
+
+		pDeletions := []string{}
 		for s, c := range o.pendingSessions {
 			if time.Since(c.created) > 10*time.Minute {
-				deletions = append(deletions, s)
+				pDeletions = append(pDeletions, s)
 			}
 		}
-		for _, d := range deletions {
+		for _, d := range pDeletions {
 			delete(o.pendingSessions, d)
 		}
+
+		sDeletions := []string{}
+		for s, c := range o.activeSessions {
+			if time.Now().After(c.claims.ExpiresAt.Time) {
+				sDeletions = append(sDeletions, s)
+			}
+		}
+		for _, d := range sDeletions {
+			delete(o.activeSessions, d)
+		}
+
 		o.mu.Unlock()
-		slog.Debug("tidied", "num_sessions", len(deletions))
+		slog.Debug("tidied",
+			"pending_sessions", len(pDeletions),
+			"active_sessions", len(sDeletions))
 		time.Sleep(1 * time.Minute)
 	}
 }
@@ -433,7 +438,7 @@ func fetchOidcConfig(uri string) (*OpenIDConfig, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	j := json.NewDecoder(resp.Body)
+	j := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
 	conf := OpenIDConfig{}
 	if err := j.Decode(&conf); err != nil {
 		return nil, err
@@ -441,6 +446,12 @@ func fetchOidcConfig(uri string) (*OpenIDConfig, error) {
 	slog.Debug("issuer", "metadata", conf)
 	if conf.Issuer != DEV_ISSUER_URL {
 		return nil, fmt.Errorf("wrong issuer url")
+	}
+	if _, err := url.Parse(conf.AuthorizationEndpoint); err != nil {
+		return nil, fmt.Errorf("invalid authz endpoint URL")
+	}
+	if _, err := url.Parse(conf.TokenEndpoint); err != nil {
+		return nil, fmt.Errorf("invalid token endpoint URL")
 	}
 
 	return &conf, nil
@@ -483,7 +494,7 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 	mux.Handle("/auth/callback", http.HandlerFunc(rp.authCallbackHandler))
 
 	// clean up old sessions
-	go rp.TidyForever()
+	go rp.tidyForever()
 
 	return rp, nil
 }
