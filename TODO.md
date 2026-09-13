@@ -45,7 +45,7 @@ Target shape:
 - [x] Bind the pending entry to the browser (short-lived cookie holding the state value, or a
       signed cookie carrying the whole entry). An unbound `state` is not a CSRF defense.
 - [x] Expire pending entries after ~10 minutes; sweep on a ticker.
-- [ ] Validate `next` before storing it: must be a relative path on this site. This is where
+- [x] Validate `next` before storing it: must be a relative path on this site. This is where
       open redirects come from.
 - [ ] Build the redirect URL: `response_type=code`, `client_id`, `redirect_uri` (exact
       registered value, **not** the original destination), `scope=openid email profile`

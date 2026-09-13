@@ -65,8 +65,11 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 		State:        stateStr,
 		Nonce:        base64.StdEncoding.EncodeToString(nonce),
 		CodeVerifier: base64.StdEncoding.EncodeToString(codeVerifier),
-		Next:         "/successfully-logged-in",
-		created:      time.Now(),
+
+		// Next should always be a valid path on this site
+		Next: "/successfully-logged-in",
+
+		created: time.Now(),
 	}
 	j, err := json.Marshal(cookieVal)
 	if err != nil {
