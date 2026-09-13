@@ -87,7 +87,7 @@ Target shape:
         in both directions
   - [x] `nonce` equals the stored nonce
   - [x] `sub` present and non-empty
-- [ ] Table-driven tests with deliberately broken tokens: expired, `alg: none`, HMAC signed
+- [x] Table-driven tests with deliberately broken tokens: expired, `alg: none`, HMAC signed
       with the RSA public key as the secret, wrong `aud`, wrong `iss`, wrong `nonce`, unknown
       `kid`, tampered payload, missing `sub`. **Each must fail.** This is the highest-value
       test file in the repo.

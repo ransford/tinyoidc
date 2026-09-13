@@ -108,6 +108,36 @@ func (o *OidcRelyingParty) keyFor(t *jwt.Token) (any, error) {
 	return nil, fmt.Errorf("no key for kid %q", kid) // later: refetch JWKS once
 }
 
+// verifyIDToken checks the ID token's signature and claims, and that its nonce is the
+// one we issued for this login attempt.
+func (o *OidcRelyingParty) verifyIDToken(raw, nonce string) (*IDTokenClaims, error) {
+	claims := &IDTokenClaims{}
+	_, err := jwt.ParseWithClaims(raw, claims, o.keyFor,
+		jwt.WithValidMethods([]string{"RS256"}),
+		jwt.WithIssuer(o.issuerUrl),
+		jwt.WithAudience(o.clientId),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(time.Minute),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if claims.Nonce != nonce {
+		return nil, fmt.Errorf("nonce mismatch")
+	}
+	if len(claims.Audience) > 1 && claims.Azp != o.clientId {
+		return nil, fmt.Errorf("azp mismatch")
+	}
+	if claims.Subject == "" {
+		return nil, fmt.Errorf("empty subject")
+	}
+	if claims.Email != "" && !claims.EmailVerified {
+		return nil, fmt.Errorf("unverified email")
+	}
+	return claims, nil
+}
+
 func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -217,46 +247,14 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	}
 	slog.Debug("parsed access token", "expires", tokenResponse.ExpiresIn)
 
-	claims := &IDTokenClaims{}
-	_, err = jwt.ParseWithClaims(tokenResponse.IdToken, claims, o.keyFor,
-		jwt.WithValidMethods([]string{"RS256"}),
-		jwt.WithIssuer(o.issuerUrl),
-		jwt.WithAudience(o.clientId),
-		jwt.WithExpirationRequired(),
-		jwt.WithIssuedAt(),
-		jwt.WithLeeway(time.Minute),
-	)
+	claims, err := o.verifyIDToken(tokenResponse.IdToken, session.Nonce)
 	if err != nil {
-		slog.Error("callback error: validate JWT claims")
+		slog.Error("callback error: verify ID token", "err", err)
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`"error: validate JWT"`))
+		w.Write([]byte(`"error: invalid ID token"`))
 		return
 	}
 	slog.Debug("JWT claims", "claims", claims)
-	if claims.Nonce != session.Nonce { /* 401 */
-		slog.Error("callback error: nonce mismatch")
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`"error: nonce mismatch"`))
-		return
-	}
-	if len(claims.Audience) > 1 && claims.Azp != o.clientId {
-		slog.Error("callback error: audience mismatch")
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`"error: audience mismatch"`))
-		return
-	}
-	if claims.Subject == "" {
-		slog.Error("callback error: empty subject")
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`"error: empty subject"`))
-		return
-	}
-	if claims.Email != "" && !claims.EmailVerified {
-		slog.Error("callback error: unverified email")
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`"error: unverified email"`))
-		return
-	}
 
 	slog.Info("logged in", "email", claims.Email)
 
