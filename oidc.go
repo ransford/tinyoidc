@@ -1,14 +1,18 @@
 package main
 
 import (
+	// "bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,6 +50,91 @@ type ClientCookie struct {
 	created time.Time
 }
 
+func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	params := r.URL.Query()
+	if params.Get("error") != "" {
+		slog.Error("callback error",
+			"error", params.Get("error"),
+			"error_description", params.Get("error_description"))
+		w.Write([]byte(`"error"`))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	state := params.Get("state")
+	o.mu.Lock()
+	session, ok := o.sessions[state]
+	if ok {
+		delete(o.sessions, state)
+	}
+	o.mu.Unlock()
+	if !ok {
+		slog.Error("callback error", "missing state", state)
+		w.Write([]byte(`"error: state not found"`))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	slog.Debug("found session", "state", state)
+
+	verif := sha256.Sum256([]byte(session.CodeVerifier))
+	chal := base64.RawURLEncoding.EncodeToString(verif[:])
+	slog.Debug("recomputed challenge", "challenge/verifier", chal)
+
+	code := params.Get("code")
+	if code == "" {
+		slog.Error("callback error: missing code")
+		w.Write([]byte(`"error: missing code"`))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	data := url.Values{}
+	data.Set("grant_type", "authorization_code")
+	data.Set("code", code)
+	data.Set("redirect_uri", o.redirectUri)
+	data.Set("code_verifier", session.CodeVerifier)
+	slog.Debug("POST to token endpoint", "data", data)
+	formEncodedReader := strings.NewReader(data.Encode())
+	fetchToken, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		o.fetchedOidcConfig.TokenEndpoint, formEncodedReader)
+	if err != nil {
+		slog.Error("callback error: post")
+		w.Write([]byte(`"error: post"`))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	fetchToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	fetchToken.SetBasicAuth(o.clientId, o.clientSecret)
+
+	client := &http.Client{}
+	resp, err := client.Do(fetchToken)
+	if err != nil {
+		slog.Error("callback error: fetch token")
+		w.Write([]byte(`"error: fetch token"`))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close() // Always close the body to prevent memory leaks
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		slog.Error("callback error: parse token")
+		w.Write([]byte(`"error: parse token"`))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// Do something with the access token
+	slog.Debug("got token", "body", body)
+
+	w.Write([]byte(`{"status": "omg"}`))
+
+	// TOOD: reconstruct the cookie and check what the browser sent
+}
+
 func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) {
 	// Log in
 	w.Header().Set("Content-Type", "application/json")
@@ -56,14 +145,18 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	rand.Read(nonce)
 
 	// PKCE
-	codeVerifier := make([]byte, 32)
-	rand.Read(codeVerifier)
+	codeVerifierRaw := make([]byte, 32)
+	rand.Read(codeVerifierRaw)
+	codeVerifier := base64.RawURLEncoding.EncodeToString(codeVerifierRaw)
+	verifierSha := sha256.Sum256([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(verifierSha[:])
+	slog.Debug("code challenge", "challenge", codeChallenge)
 
 	stateStr := base64.StdEncoding.EncodeToString(state)
 	cookieVal := ClientCookie{
 		State:        stateStr,
 		Nonce:        base64.StdEncoding.EncodeToString(nonce),
-		CodeVerifier: base64.StdEncoding.EncodeToString(codeVerifier),
+		CodeVerifier: codeVerifier,
 
 		// Next should always be a valid path on this site
 		Next: "/successfully-logged-in",
@@ -80,6 +173,7 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	slog.Debug("wrote session", "key", stateStr)
 	o.mu.Unlock()
 
+	// Compute cookie value from cookieVal (should just use state?)
 	cv := sha256.Sum256(j)
 	cookie := http.Cookie{
 		Name:     "tinyoidc_session",
@@ -103,18 +197,14 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	params.Add("client_id", o.clientId)
 	params.Add("redirect_uri", o.redirectUri)
 	params.Add("scope", "openid email")
-	params.Add("state", stateStr)
+	params.Add("state", cookieVal.State)
+	params.Add("nonce", cookieVal.Nonce)
 	params.Add("code_challenge_method", "S256")
-	cv2 := sha256.Sum256(codeVerifier)
-	codeChallenge := base64.RawURLEncoding.EncodeToString(cv2[:])
 	params.Add("code_challenge", codeChallenge)
 	baseUrl.RawQuery = params.Encode()
 	slog.Debug("redirecting", "location", baseUrl.String())
 
 	http.Redirect(w, r, baseUrl.String(), http.StatusFound)
-
-	w.Write([]byte(`{"hi": "there"}`))
-	// w.WriteHeader(http.StatusOK)
 }
 
 func (o *OidcRelyingParty) TidyForever() {
@@ -183,6 +273,7 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 	}
 
 	mux.Handle("/login", http.HandlerFunc(rp.loginHandler))
+	mux.Handle("/auth/callback", http.HandlerFunc(rp.authCallbackHandler))
 
 	// clean up old sessions
 	go rp.TidyForever()

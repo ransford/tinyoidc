@@ -55,15 +55,15 @@ Target shape:
 
 ## Slice 3 — the callback
 
-- [ ] Handle the error branch first: `?error=access_denied&error_description=...` with no
+- [x] Handle the error branch first: `?error=access_denied&error_description=...` with no
       `code`. Render something human; do not panic, do not 500.
-- [ ] Look up `state`. Missing, unknown, expired, or not matching the browser's cookie → reject.
-- [ ] **Consume the pending entry** — delete it before doing anything else, so a replayed
+- [x] Look up `state`. Missing, unknown, expired, or not matching the browser's cookie → reject.
+- [x] **Consume the pending entry** — delete it before doing anything else, so a replayed
       callback finds nothing.
-- [ ] Exchange the code at `token_endpoint`: POST, `application/x-www-form-urlencoded`,
+- [x] Exchange the code at `token_endpoint`: POST, `application/x-www-form-urlencoded`,
       `grant_type=authorization_code`, `code`, `redirect_uri` (identical to Slice 2),
       `code_verifier`. Do **not** send `state`.
-- [ ] Client authentication: `client_secret_basic` (HTTP Basic header) by default; pick based
+- [x] Client authentication: `client_secret_basic` (HTTP Basic header) by default; pick based
       on `token_endpoint_auth_methods_supported`.
 - [ ] Parse the JSON response: `access_token`, `token_type`, `expires_in`, `id_token`,
       maybe `refresh_token`, `scope`. Handle the OAuth error JSON body too.
