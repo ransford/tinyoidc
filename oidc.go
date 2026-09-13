@@ -192,7 +192,6 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	data.Set("code", code)
 	data.Set("redirect_uri", o.redirectUri)
 	data.Set("code_verifier", session.CodeVerifier)
-	slog.Debug("POST to token endpoint", "data", data)
 	formEncodedReader := strings.NewReader(data.Encode())
 	fetchToken, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		o.fetchedOidcConfig.TokenEndpoint, formEncodedReader)
@@ -224,7 +223,6 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
-	slog.Debug("JWT claims", "claims", claims)
 
 	slog.Info("logged in", "email", claims.Email)
 
