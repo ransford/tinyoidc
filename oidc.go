@@ -4,12 +4,14 @@ import (
 	// "bytes"
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -36,6 +38,7 @@ type OidcRelyingParty struct {
 	cookieSigningKey []byte
 
 	fetchedOidcConfig *OpenIDConfig
+	jwks              *Jwks
 
 	mu       sync.Mutex
 	sessions map[string]*ClientCookie
@@ -74,6 +77,26 @@ type IDTokenClaims struct {
 	Azp                  string `json:"azp"`
 	Email                string `json:"email"`
 	EmailVerified        bool   `json:"email_verified"`
+}
+
+// keyFor is the jwt.Keyfunc: choose the OP's public key by the token's kid.
+func (o *OidcRelyingParty) keyFor(t *jwt.Token) (any, error) {
+	kid, _ := t.Header["kid"].(string)
+	for _, k := range o.jwks.Keys {
+		if k.Kid != kid || k.Kty != "RSA" {
+			continue
+		}
+		n, err := base64.RawURLEncoding.DecodeString(k.N)
+		if err != nil {
+			return nil, err
+		}
+		e, err := base64.RawURLEncoding.DecodeString(k.E)
+		if err != nil {
+			return nil, err
+		}
+		return &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: int(new(big.Int).SetBytes(e).Int64())}, nil
+	}
+	return nil, fmt.Errorf("no key for kid %q", kid) // later: refetch JWKS once
 }
 
 func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Request) {
@@ -185,41 +208,41 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	}
 	slog.Debug("parsed access token", "expires", tokenResponse.ExpiresIn)
 
-	// Get the JWKS URI
-	slog.Debug("fetching jwks", "jwks_uri", o.fetchedOidcConfig.JwksUri)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel2()
-	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, o.fetchedOidcConfig.JwksUri, nil)
+	claims := &IDTokenClaims{}
+	_, err = jwt.ParseWithClaims(tokenResponse.IdToken, claims, o.keyFor,
+		jwt.WithValidMethods([]string{"RS256"}),
+		jwt.WithIssuer(o.issuerUrl),
+		jwt.WithAudience(o.clientId),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(time.Minute),
+	)
 	if err != nil {
-		slog.Error("callback error: jwks client init")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`"error: jwks client init"`))
+		slog.Error("callback error: validate JWT claims")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`"error: validate JWT"`))
 		return
 	}
-	resp2, err := client.Do(req)
-	if err != nil {
-		slog.Error("callback error: jwks fetch")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`"error: jwks fetch"`))
+	if claims.Nonce != session.Nonce { /* 401 */
+		slog.Error("callback error: nonce mismatch")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`"error: nonce mismatch"`))
 		return
 	}
-	defer resp2.Body.Close()
-	body2, err := io.ReadAll(resp2.Body)
-	if err != nil {
-		slog.Error("callback error: read jwks")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`"error: read jwks"`))
+	if len(claims.Audience) > 1 && claims.Azp != o.clientId {
+		slog.Error("callback error: audience mismatch")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`"error: audience mismatch"`))
 		return
 	}
-	slog.Debug("jwks", "body", body2)
-	parsedJwks := Jwks{}
-	if err := json.Unmarshal(body2, &parsedJwks); err != nil {
-		slog.Error("callback error: parse jwks")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`"error: read parse"`))
+	if claims.Subject == "" {
+		slog.Error("callback error: empty subject")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`"error: empty subject"`))
 		return
 	}
-	slog.Debug("parsed jwks", "jwks", parsedJwks)
+	// user identity = (claims.Issuer, claims.Subject)
+	slog.Info("logged in", "issuer", claims.Issuer, "subject", claims.Subject)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status": "got access token"}`))
@@ -342,7 +365,30 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		return nil, fmt.Errorf("wrong issuer url")
 	}
 
-	// TODO: fetch JWKS URI once and populate a field in conf
+	// Get the JWKS URI
+	slog.Debug("fetching jwks", "jwks_uri", conf.JwksUri)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := &http.Client{}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, conf.JwksUri, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp2, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp2.Body.Close()
+	body, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		return nil, err
+	}
+	slog.Debug("jwks", "body", body)
+	parsedJwks := Jwks{}
+	if err := json.Unmarshal(body, &parsedJwks); err != nil {
+		return nil, err
+	}
+	slog.Debug("parsed jwks", "jwks", parsedJwks)
 
 	rp := &OidcRelyingParty{
 		server:            srv,
@@ -353,6 +399,7 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		scopes:            []string{"openid", "email"},
 		cookieSigningKey:  cookieSigningKey,
 		fetchedOidcConfig: &conf,
+		jwks:              &parsedJwks,
 
 		sessions: make(map[string]*ClientCookie),
 	}
