@@ -21,7 +21,7 @@ staticClients:
     name: tinyoidc dev
     secret: tinyoidc-dev-secret
     redirectURIs:
-      - http://localhost:8080/auth/callback
+      - http://localhost:8192/auth/callback
 
 enablePasswordDB: true
 staticPasswords:
