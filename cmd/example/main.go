@@ -28,7 +28,7 @@ func main() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<header><a href="/">Home</a> · <a href="/private">Private page</a> · `)
 		if claims, ok := rp.Claims(r); ok {
-			fmt.Fprintf(w, `Logged in as %s · <a href="/auth/logout">Log out</a>`, html.EscapeString(claims.Email))
+			fmt.Fprintf(w, `Logged in as %s · <form method="post" action="/auth/logout" style="display:inline"><button>Log out</button></form>`, html.EscapeString(claims.Email))
 		} else {
 			login := "/auth/login?" + url.Values{"next": {r.URL.RequestURI()}}.Encode()
 			fmt.Fprintf(w, `Not logged in · <a href="%s">Log in</a>`, html.EscapeString(login))

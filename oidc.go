@@ -293,15 +293,15 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
+// logoutHandler is registered for POST only, so a cross-site <img> or link can't log
+// anyone out. A cross-site form POST won't carry the SameSite=Lax session cookie.
 func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: make this be POST or CSRF protected
-
 	var sessionId string
 
 	cookie, err := r.Cookie("__Host-tinyoidc_session")
 	if err != nil {
 		slog.Error("logout: invalid session")
-		w.WriteHeader(http.StatusBadRequest)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	sessionId = cookie.Value
@@ -319,6 +319,7 @@ func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request)
 	delete(o.activeSessions, sessionId)
 	o.mu.Unlock()
 	if !logout {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 
@@ -333,7 +334,7 @@ func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request)
 	})
 
 	slog.Info("logout", "username", u, "after", dur)
-	w.WriteHeader(http.StatusOK)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // isLocalPath reports whether next is a path on this site, and so safe to redirect to
@@ -508,7 +509,7 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 	}
 
 	mux.Handle("/auth/login", http.HandlerFunc(rp.loginHandler))
-	mux.Handle("/auth/logout", http.HandlerFunc(rp.logoutHandler))
+	mux.Handle("POST /auth/logout", http.HandlerFunc(rp.logoutHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(rp.authCallbackHandler))
 
 	// clean up old sessions
