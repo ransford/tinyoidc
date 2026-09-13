@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -58,8 +59,6 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	codeVerifier := make([]byte, 32)
 	rand.Read(codeVerifier)
 
-	// codeChallenge := base64.RawURLEncoding.EncodeToString(sha256.Sum256(codeVerifier))
-
 	stateStr := base64.StdEncoding.EncodeToString(state)
 	cookieVal := ClientCookie{
 		State:        stateStr,
@@ -96,6 +95,21 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	// Behind the scenes this adds a `Set-Cookie` header to the response
 	// containing the necessary cookie data.
 	http.SetCookie(w, &cookie)
+
+	// Redirect URL
+	baseUrl, _ := url.Parse(o.fetchedOidcConfig.AuthorizationEndpoint)
+	params := url.Values{}
+	params.Add("response_type", "code")
+	params.Add("client_id", o.clientId)
+	params.Add("redirect_uri", o.redirectUri)
+	params.Add("scope", "openid email")
+	params.Add("state", stateStr)
+	params.Add("code_challenge_method", "S256")
+	cv2 := sha256.Sum256(codeVerifier)
+	codeChallenge := base64.RawURLEncoding.EncodeToString(cv2[:])
+	params.Add("code_challenge", codeChallenge)
+	baseUrl.RawQuery = params.Encode()
+	slog.Debug("redirecting", "location", baseUrl.String())
 
 	w.Write([]byte(`{"hi": "there"}`))
 	// w.WriteHeader(http.StatusOK)
