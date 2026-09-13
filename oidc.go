@@ -61,6 +61,7 @@ type ClientCookie struct {
 type ActiveSession struct {
 	Username string `json:"username"`
 	created  time.Time
+	claims   *IDTokenClaims
 }
 
 type TokenResponse struct {
@@ -260,11 +261,11 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	slog.Info("logged in", "email", claims.Email)
 
 	sessionId := uuid.New().String()
-
 	o.mu.Lock()
 	o.activeSessions[sessionId] = &ActiveSession{
 		Username: claims.Email,
 		created:  time.Now(),
+		claims:   claims,
 	}
 	o.mu.Unlock()
 
