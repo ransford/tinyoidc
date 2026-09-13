@@ -121,7 +121,9 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	fetchToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	fetchToken.SetBasicAuth(o.clientId, o.clientSecret)
 
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
 	resp, err := client.Do(fetchToken)
 	if err != nil {
 		slog.Error("callback error: fetch token")
