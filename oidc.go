@@ -58,8 +58,8 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		slog.Error("callback error",
 			"error", params.Get("error"),
 			"error_description", params.Get("error_description"))
-		w.Write([]byte(`"error"`))
 		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`"error"`))
 		return
 	}
 
@@ -68,14 +68,14 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	cookie, err := r.Cookie("__Host-tinyoidc_state")
 	if err != nil {
 		slog.Error("callback error", "missing state cookie", state)
-		w.Write([]byte(`"error: tinyoidc_state cookie not found"`))
 		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`"error: tinyoidc_state cookie not found"`))
 		return
 	}
 	if cookie.Value != state {
 		slog.Error("callback error", "mismatching state cookie", state)
-		w.Write([]byte(`"error: tinyoidc_state cookie mismatch"`))
 		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`"error: tinyoidc_state cookie mismatch"`))
 		return
 	}
 
@@ -87,8 +87,8 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	o.mu.Unlock()
 	if !ok {
 		slog.Error("callback error", "missing state", state)
-		w.Write([]byte(`"error: state not found"`))
 		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`"error: state not found"`))
 		return
 	}
 	slog.Debug("found session", "state", state)
@@ -96,8 +96,8 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	code := params.Get("code")
 	if code == "" {
 		slog.Error("callback error: missing code")
-		w.Write([]byte(`"error: missing code"`))
 		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`"error: missing code"`))
 		return
 	}
 
@@ -114,8 +114,8 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		o.fetchedOidcConfig.TokenEndpoint, formEncodedReader)
 	if err != nil {
 		slog.Error("callback error: post")
-		w.Write([]byte(`"error: post"`))
 		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`"error: post"`))
 		return
 	}
 	fetchToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -125,16 +125,16 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	resp, err := client.Do(fetchToken)
 	if err != nil {
 		slog.Error("callback error: fetch token")
-		w.Write([]byte(`"error: fetch token"`))
 		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`"error: fetch token"`))
 		return
 	}
 	defer resp.Body.Close() // Always close the body to prevent memory leaks
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		slog.Error("callback error: parse token")
-		w.Write([]byte(`"error: parse token"`))
 		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`"error: parse token"`))
 		return
 	}
 
@@ -146,6 +146,7 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
 		HttpOnly: true,
+		Secure:   true,
 	})
 
 	// Do something with the access token
