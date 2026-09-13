@@ -50,6 +50,13 @@ type ClientCookie struct {
 	created time.Time
 }
 
+type AccessToken struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	ExpiresIn   int64  `json:"expires_in"`
+	IdToken     string `json:"id_token"`
+}
+
 func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -134,9 +141,9 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	defer resp.Body.Close() // Always close the body to prevent memory leaks
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		slog.Error("callback error: parse token")
+		slog.Error("callback error: read token")
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`"error: parse token"`))
+		w.Write([]byte(`"error: read token"`))
 		return
 	}
 
@@ -152,11 +159,17 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	})
 
 	// Do something with the access token
-	slog.Debug("got token", "body", body)
+	accessToken := AccessToken{}
+	if err := json.Unmarshal(body, &accessToken); err != nil {
+		slog.Error("callback error: parse token")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`"error: parse token"`))
+		return
+	}
+	slog.Debug("parsed access token", "expires", accessToken.ExpiresIn)
 
-	w.Write([]byte(`{"status": "omg"}`))
-
-	// TOOD: reconstruct the cookie and check what the browser sent
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status": "got access token"}`))
 }
 
 func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) {

@@ -65,9 +65,9 @@ Target shape:
       `code_verifier`. Do **not** send `state`.
 - [x] Client authentication: `client_secret_basic` (HTTP Basic header) by default; pick based
       on `token_endpoint_auth_methods_supported`.
-- [ ] Parse the JSON response: `access_token`, `token_type`, `expires_in`, `id_token`,
+- [x] Parse the JSON response: `access_token`, `token_type`, `expires_in`, `id_token`,
       maybe `refresh_token`, `scope`. Handle the OAuth error JSON body too.
-- [ ] Timeouts and a bounded response read on the token call.
+- [x] Timeouts and a bounded response read on the token call.
 
 ## Slice 4 — ID token verification (the important one)
 
