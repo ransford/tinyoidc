@@ -15,24 +15,24 @@ Target shape:
 
 ## Slice 0 — clear the decks
 
-- [ ] Delete `authzHandler`, `tokenHandler`, `wellKnownHandler` from `oidc.go`. Those are OP
+- [x] Delete `authzHandler`, `tokenHandler`, `wellKnownHandler` from `oidc.go`. Those are OP
       endpoints; we're the RP and we *call* them on someone else's server.
-- [ ] Rename `OidcServer` → something RP-flavored, or drop it and expose middleware plus a
+- [x] Rename `OidcServer` → something RP-flavored, or drop it and expose middleware plus a
       small demo `main.go` with one protected route and one public route.
-- [ ] Register a test client and write down `client_id` / `client_secret` / redirect URI.
+- [x] Register a test client and write down `client_id` / `client_secret` / redirect URI.
       Start with a local OP (see Slice 8), not Google.
-- [ ] Config struct: issuer URL, client ID, client secret, redirect URI, scopes,
+- [x] Config struct: issuer URL, client ID, client secret, redirect URI, scopes,
       cookie signing key. Load from env; never commit the secret.
 
 ## Slice 1 — discovery
 
-- [ ] `GET {issuer}/.well-known/openid-configuration`, parse into a struct.
+- [x] `GET {issuer}/.well-known/openid-configuration`, parse into a struct.
       Fields actually needed: `issuer`, `authorization_endpoint`, `token_endpoint`,
       `jwks_uri`, `id_token_signing_alg_values_supported`, `scopes_supported`,
       `token_endpoint_auth_methods_supported`, `userinfo_endpoint`, `end_session_endpoint`.
-- [ ] Verify the returned `issuer` matches the URL you asked. Mismatch = abort.
-- [ ] Cache the document with a TTL. Refresh in the background, never block a login on it.
-- [ ] Require HTTPS for the issuer, with a localhost/dev escape hatch.
+- [x] Verify the returned `issuer` matches the URL you asked. Mismatch = abort.
+- [x] Cache the document with a TTL. Refresh in the background, never block a login on it.
+- [x] Require HTTPS for the issuer, with a localhost/dev escape hatch.
 
 ## Slice 2 — the authorization request
 

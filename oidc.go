@@ -66,6 +66,9 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 	}
 	slog.Info("fetched", "url", oidcConfigUrl)
 	slog.Debug("issuer", "metadata", conf)
+	if conf.Issuer != DEV_ISSUER_URL {
+		return nil, fmt.Errorf("wrong issuer url")
+	}
 
 	return &OidcRelyingParty{
 		server:            srv,
