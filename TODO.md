@@ -36,15 +36,15 @@ Target shape:
 
 ## Slice 2 — the authorization request
 
-- [ ] Generate per-attempt secrets from `crypto/rand`: `state`, `nonce`, PKCE `code_verifier`.
-- [ ] PKCE: `code_challenge` = base64url(SHA-256(verifier)), `code_challenge_method=S256`.
-- [ ] Pending-auth store keyed by `state`, holding `nonce`, `code_verifier`, the post-login
+- [x] Generate per-attempt secrets from `crypto/rand`: `state`, `nonce`, PKCE `code_verifier`.
+- [x] PKCE: `code_challenge` = base64url(SHA-256(verifier)), `code_challenge_method=S256`.
+- [x] Pending-auth store keyed by `state`, holding `nonce`, `code_verifier`, the post-login
       destination, and a created-at timestamp. **A map, not a single value** — one browser can
       have several logins in flight. Start in-memory with a mutex; note where a shared store
       would go.
-- [ ] Bind the pending entry to the browser (short-lived cookie holding the state value, or a
+- [x] Bind the pending entry to the browser (short-lived cookie holding the state value, or a
       signed cookie carrying the whole entry). An unbound `state` is not a CSRF defense.
-- [ ] Expire pending entries after ~10 minutes; sweep on a ticker.
+- [x] Expire pending entries after ~10 minutes; sweep on a ticker.
 - [ ] Validate `next` before storing it: must be a relative path on this site. This is where
       open redirects come from.
 - [ ] Build the redirect URL: `response_type=code`, `client_id`, `redirect_uri` (exact

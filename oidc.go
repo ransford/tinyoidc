@@ -2,10 +2,13 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -26,18 +29,95 @@ type OidcRelyingParty struct {
 	cookieSigningKey []byte
 
 	fetchedOidcConfig *OpenIDConfig
+
+	mu       sync.Mutex
+	sessions map[string]*ClientCookie
 }
 
-func myHandler(w http.ResponseWriter, r *http.Request) {
+type ClientCookie struct {
+	State        string `json:"state"`
+	Nonce        string `json:"nonce"`
+	CodeVerifier string `json:"code_verifier"`
+
+	// Client's original destination before we made them auth
+	Next string `json:"next"`
+
+	created time.Time
+}
+
+func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) {
+	// Log in
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+
+	state := make([]byte, 32)
+	rand.Read(state)
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+
+	// PKCE
+	codeVerifier := make([]byte, 32)
+	rand.Read(codeVerifier)
+
+	// codeChallenge := base64.RawURLEncoding.EncodeToString(sha256.Sum256(codeVerifier))
+
+	stateStr := base64.StdEncoding.EncodeToString(state)
+	cookieVal := ClientCookie{
+		State:        stateStr,
+		Nonce:        base64.StdEncoding.EncodeToString(nonce),
+		CodeVerifier: base64.StdEncoding.EncodeToString(codeVerifier),
+		Next:         "/successfully-logged-in",
+		created:      time.Now(),
+	}
+	j, err := json.Marshal(cookieVal)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	o.mu.Lock()
+	o.sessions[stateStr] = &cookieVal
+	slog.Debug("wrote session", "key", stateStr)
+	o.mu.Unlock()
+
+	cv := sha256.Sum256(j)
+	cookie := http.Cookie{
+		Name:     "tinyoidc_session",
+		Value:    base64.RawURLEncoding.EncodeToString(cv[:]),
+		Path:     "/",
+		MaxAge:   3600,
+		HttpOnly: true,
+		// Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	}
+
+	// Use the http.SetCookie() function to send the cookie to the client.
+	// Behind the scenes this adds a `Set-Cookie` header to the response
+	// containing the necessary cookie data.
+	http.SetCookie(w, &cookie)
+
+	w.Write([]byte(`{"hi": "there"}`))
+	// w.WriteHeader(http.StatusOK)
+}
+
+func (o *OidcRelyingParty) TidyForever() {
+	for {
+		o.mu.Lock()
+		deletions := []string{}
+		for s, c := range o.sessions {
+			if time.Since(c.created) > 10*time.Minute {
+				deletions = append(deletions, s)
+			}
+		}
+		for _, d := range deletions {
+			delete(o.sessions, d)
+		}
+		o.mu.Unlock()
+		slog.Debug("tidied", "num_sessions", len(deletions))
+		time.Sleep(1 * time.Minute)
+	}
 }
 
 func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 	mux := http.NewServeMux()
-
-	// Endpoints for OIDC
-	mux.Handle("/foo", http.HandlerFunc(myHandler))
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
@@ -70,7 +150,7 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		return nil, fmt.Errorf("wrong issuer url")
 	}
 
-	return &OidcRelyingParty{
+	rp := &OidcRelyingParty{
 		server:            srv,
 		issuerUrl:         DEV_ISSUER_URL,
 		clientId:          DEV_CLIENT_ID,
@@ -79,7 +159,16 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		scopes:            []string{"openid", "email"},
 		cookieSigningKey:  cookieSigningKey,
 		fetchedOidcConfig: &conf,
-	}, nil
+
+		sessions: make(map[string]*ClientCookie),
+	}
+
+	mux.Handle("/login", http.HandlerFunc(rp.loginHandler))
+
+	// clean up old sessions
+	go rp.TidyForever()
+
+	return rp, nil
 }
 
 func (o *OidcRelyingParty) ListenAndServe() error {
