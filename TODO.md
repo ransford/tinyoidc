@@ -100,7 +100,7 @@ Target shape:
       or an opaque ID against a server-side store. The ID token is a door check, not a wristband.
 - [x] Cookie flags: `HttpOnly`, `Secure`, `SameSite=Lax` (`Strict` breaks the callback),
       `Path=/`, explicit `Max-Age`. Consider the `__Host-` prefix.
-- [ ] `Middleware`: session present and valid → put claims in the request `Context` and call
+- [x] `Middleware`: session present and valid → put claims in the request `Context` and call
       the next handler. Otherwise → stash the destination and redirect to `/auth/login`.
 - [ ] Only redirect to login for navigation requests. API/XHR requests should get a 401, not a
       302 into Google's HTML.

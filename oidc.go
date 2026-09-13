@@ -285,8 +285,12 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	// containing the necessary cookie data.
 	http.SetCookie(w, &sessionCookie)
 
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(fmt.Sprintf(`{"status": "logged in", "email": "%s"}`, claims.Email)))
+	// Re-check the destination even though loginHandler validated it before storing.
+	next := session.Next
+	if !isLocalPath(next) {
+		next = "/"
+	}
+	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
 func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request) {
@@ -332,9 +336,30 @@ func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusOK)
 }
 
+// isLocalPath reports whether next is a path on this site, and so safe to redirect to
+// after login. Anything else is a potential open redirect.
+func isLocalPath(next string) bool {
+	// "//evil" and "/\\evil" are scheme-relative URLs to browsers.
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.ContainsAny(next, "\\") {
+		return false
+	}
+	for _, c := range next {
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	u, err := url.Parse(next)
+	return err == nil && u.Scheme == "" && u.Host == ""
+}
+
 func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) {
 	// Log in
 	w.Header().Set("Content-Type", "application/json")
+
+	next := r.URL.Query().Get("next")
+	if !isLocalPath(next) {
+		next = "/"
+	}
 
 	state := make([]byte, 32)
 	rand.Read(state)
@@ -356,7 +381,7 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 		CodeVerifier: codeVerifier,
 
 		// Next should always be a valid path on this site
-		Next: "/successfully-logged-in",
+		Next: next,
 
 		created: time.Now(),
 	}
@@ -511,7 +536,8 @@ func (o *OidcRelyingParty) Middleware(next http.Handler) http.Handler {
 			o.mu.Unlock()
 		}
 		if session == nil || time.Now().After(session.claims.ExpiresAt.Time) {
-			http.Redirect(w, r, "/auth/login", http.StatusFound)
+			login := "/auth/login?" + url.Values{"next": {r.URL.RequestURI()}}.Encode()
+			http.Redirect(w, r, login, http.StatusFound)
 			return
 		}
 		ctx := context.WithValue(r.Context(), claimsContextKey{}, session.claims)
