@@ -1,4 +1,4 @@
-package main
+package tinyoidc
 
 import (
 	// "bytes"
@@ -30,7 +30,7 @@ const DEV_CLIENT_ID = "tinyoidc"
 const DEV_CLIENT_SECRET = "tinyoidc-dev-secret"
 
 type OidcRelyingParty struct {
-	server *http.Server
+	mux *http.ServeMux
 
 	issuerUrl        string
 	clientId         string
@@ -418,13 +418,6 @@ func (o *OidcRelyingParty) TidyForever() {
 func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 	mux := http.NewServeMux()
 
-	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", port),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		Handler:      mux,
-	}
-
 	cookieSigningKey := make([]byte, 32)
 	_, err := rand.Read(cookieSigningKey)
 	if err != nil {
@@ -475,7 +468,7 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 	slog.Debug("parsed jwks", "jwks", parsedJwks)
 
 	rp := &OidcRelyingParty{
-		server:            srv,
+		mux:               mux,
 		issuerUrl:         DEV_ISSUER_URL,
 		clientId:          DEV_CLIENT_ID,
 		clientSecret:      DEV_CLIENT_SECRET,
@@ -499,9 +492,37 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 	return rp, nil
 }
 
-func (o *OidcRelyingParty) ListenAndServe() error {
-	slog.Info("starting server", "addr", o.server.Addr)
-	return o.server.ListenAndServe()
+// Handler serves the /auth/* routes. Mount it at "/auth/" on the application's mux.
+func (o *OidcRelyingParty) Handler() http.Handler {
+	return o.mux
+}
+
+type claimsContextKey struct{}
+
+// Middleware passes requests with a valid session through to next, with the
+// session's ID token claims in the request context. Everything else is
+// redirected to /auth/login.
+func (o *OidcRelyingParty) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var session *ActiveSession
+		if cookie, err := r.Cookie("__Host-tinyoidc_session"); err == nil {
+			o.mu.Lock()
+			session = o.activeSessions[cookie.Value]
+			o.mu.Unlock()
+		}
+		if session == nil || time.Now().After(session.claims.ExpiresAt.Time) {
+			http.Redirect(w, r, "/auth/login", http.StatusFound)
+			return
+		}
+		ctx := context.WithValue(r.Context(), claimsContextKey{}, session.claims)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// ClaimsFromContext returns the claims Middleware stored in a request context.
+func ClaimsFromContext(ctx context.Context) (*IDTokenClaims, bool) {
+	claims, ok := ctx.Value(claimsContextKey{}).(*IDTokenClaims)
+	return claims, ok
 }
 
 type OpenIDConfig struct {
