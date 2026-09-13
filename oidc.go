@@ -63,7 +63,22 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Check that the state is present and state matches cookie so it can't be reused
 	state := params.Get("state")
+	cookie, err := r.Cookie("__Host-tinyoidc_state")
+	if err != nil {
+		slog.Error("callback error", "missing state cookie", state)
+		w.Write([]byte(`"error: tinyoidc_state cookie not found"`))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if cookie.Value != state {
+		slog.Error("callback error", "mismatching state cookie", state)
+		w.Write([]byte(`"error: tinyoidc_state cookie mismatch"`))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	o.mu.Lock()
 	session, ok := o.sessions[state]
 	if ok {
@@ -77,10 +92,6 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 	slog.Debug("found session", "state", state)
-
-	verif := sha256.Sum256([]byte(session.CodeVerifier))
-	chal := base64.RawURLEncoding.EncodeToString(verif[:])
-	slog.Debug("recomputed challenge", "challenge/verifier", chal)
 
 	code := params.Get("code")
 	if code == "" {
@@ -127,6 +138,16 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Delete the state cookie so it can't be reused
+	http.SetCookie(w, &http.Cookie{
+		Name:     "__Host-tinyoidc_state",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+		HttpOnly: true,
+	})
+
 	// Do something with the access token
 	slog.Debug("got token", "body", body)
 
@@ -144,7 +165,7 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	nonce := make([]byte, 32)
 	rand.Read(nonce)
 
-	// PKCE
+	// PKCE: compute a challenge from a (secret) random verifier
 	codeVerifierRaw := make([]byte, 32)
 	rand.Read(codeVerifierRaw)
 	codeVerifier := base64.RawURLEncoding.EncodeToString(codeVerifierRaw)
@@ -152,10 +173,10 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	codeChallenge := base64.RawURLEncoding.EncodeToString(verifierSha[:])
 	slog.Debug("code challenge", "challenge", codeChallenge)
 
-	stateStr := base64.StdEncoding.EncodeToString(state)
+	stateStr := base64.RawURLEncoding.EncodeToString(state)
 	cookieVal := ClientCookie{
 		State:        stateStr,
-		Nonce:        base64.StdEncoding.EncodeToString(nonce),
+		Nonce:        base64.RawURLEncoding.EncodeToString(nonce),
 		CodeVerifier: codeVerifier,
 
 		// Next should always be a valid path on this site
@@ -163,25 +184,18 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 
 		created: time.Now(),
 	}
-	j, err := json.Marshal(cookieVal)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
 	o.mu.Lock()
 	o.sessions[stateStr] = &cookieVal
 	slog.Debug("wrote session", "key", stateStr)
 	o.mu.Unlock()
 
-	// Compute cookie value from cookieVal (should just use state?)
-	cv := sha256.Sum256(j)
 	cookie := http.Cookie{
-		Name:     "tinyoidc_session",
-		Value:    base64.RawURLEncoding.EncodeToString(cv[:]),
+		Name:     "__Host-tinyoidc_state",
+		Value:    stateStr,
 		Path:     "/",
-		MaxAge:   3600,
+		MaxAge:   600,
 		HttpOnly: true,
-		// Secure:   true,
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	}
 
