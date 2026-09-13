@@ -47,11 +47,11 @@ Target shape:
 - [x] Expire pending entries after ~10 minutes; sweep on a ticker.
 - [x] Validate `next` before storing it: must be a relative path on this site. This is where
       open redirects come from.
-- [ ] Build the redirect URL: `response_type=code`, `client_id`, `redirect_uri` (exact
+- [x] Build the redirect URL: `response_type=code`, `client_id`, `redirect_uri` (exact
       registered value, **not** the original destination), `scope=openid email profile`
       (space-delimited), `state`, `nonce`, `code_challenge`, `code_challenge_method`.
-- [ ] Respond 302 (or 303) to the authorization endpoint.
-- [ ] Eyeball the generated URL by hand before moving on.
+- [x] Respond 302 (or 303) to the authorization endpoint.
+- [x] Eyeball the generated URL by hand before moving on.
 
 ## Slice 3 — the callback
 

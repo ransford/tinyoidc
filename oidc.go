@@ -111,6 +111,8 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	baseUrl.RawQuery = params.Encode()
 	slog.Debug("redirecting", "location", baseUrl.String())
 
+	http.Redirect(w, r, baseUrl.String(), http.StatusFound)
+
 	w.Write([]byte(`{"hi": "there"}`))
 	// w.WriteHeader(http.StatusOK)
 }
