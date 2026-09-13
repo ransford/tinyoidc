@@ -60,17 +60,8 @@ If the OP supports it (`authorization_response_iss_parameter_supported`), the ca
 
 ```sh
 dev/dex/run.sh   # idempotent; (re)starts the `dex` container
-curl -s http://localhost:5556/dex/.well-known/openid-configuration | jq .
+go run ./cmd/example
 ```
-
-Settings from `dev/dex/config.yaml` (dev-only; none are real secrets):
-
-| | |
-|---|---|
-| issuer | `http://localhost:5556/dex` |
-| client_id / client_secret | `tinyoidc` / `tinyoidc-dev-secret` |
-| redirect_uri | `http://localhost:8080/auth/callback` |
-| test user | `alice@example.com` / `password` |
 
 Notes:
  * Storage is in-memory: restarting Dex invalidates codes, tokens, and signing keys.

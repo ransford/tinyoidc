@@ -1,7 +1,6 @@
 package tinyoidc
 
 import (
-	// "bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -32,12 +31,11 @@ const SESSION_COOKIE_NAME = "__Host-tinyoidc_session"
 type OidcRelyingParty struct {
 	mux *http.ServeMux
 
-	issuerUrl        string
-	clientId         string
-	clientSecret     string
-	redirectUri      string
-	scopes           []string
-	cookieSigningKey []byte
+	issuerUrl    string
+	clientId     string
+	clientSecret string
+	redirectUri  string
+	scopes       []string
 
 	fetchedOidcConfig *OpenIDConfig
 
@@ -51,18 +49,18 @@ type OidcRelyingParty struct {
 }
 
 type ClientCookie struct {
-	State        string `json:"state"`
-	Nonce        string `json:"nonce"`
-	CodeVerifier string `json:"code_verifier"`
+	State        string
+	Nonce        string
+	CodeVerifier string
 
 	// Client's original destination before we made them auth
-	Next string `json:"next"`
+	Next string
 
 	created time.Time
 }
 
 type ActiveSession struct {
-	Username string `json:"username"`
+	Username string
 	claims   *IDTokenClaims
 
 	created time.Time
@@ -400,7 +398,7 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	params.Add("response_type", "code")
 	params.Add("client_id", o.clientId)
 	params.Add("redirect_uri", o.redirectUri)
-	params.Add("scope", "openid email")
+	params.Add("scope", strings.Join(o.scopes, " "))
 	params.Add("state", cookieVal.State)
 	params.Add("nonce", cookieVal.Nonce)
 	params.Add("code_challenge_method", "S256")
@@ -431,12 +429,6 @@ func (o *OidcRelyingParty) TidyForever() {
 
 func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 	mux := http.NewServeMux()
-
-	cookieSigningKey := make([]byte, 32)
-	_, err := rand.Read(cookieSigningKey)
-	if err != nil {
-		return nil, err
-	}
 
 	// Get OIDC configuration from SP
 	oidcConfigUrl := fmt.Sprintf("%s/.well-known/openid-configuration", DEV_ISSUER_URL)
@@ -470,7 +462,6 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		clientSecret:      DEV_CLIENT_SECRET,
 		redirectUri:       fmt.Sprintf("http://localhost:%d/auth/callback", DEFAULT_PORT),
 		scopes:            []string{"openid", "email"},
-		cookieSigningKey:  cookieSigningKey,
 		fetchedOidcConfig: &conf,
 		jwks:              jwks,
 		jwksFetched:       time.Now(),

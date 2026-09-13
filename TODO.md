@@ -8,7 +8,7 @@ Target shape:
 
 - `GET /auth/login?next=/foo` — start the flow
 - `GET /auth/callback` — finish the flow
-- `GET /auth/logout` — drop the session
+- `POST /auth/logout` — drop the session
 - `Middleware(next http.Handler) http.Handler` — the actual product
 
 ---
@@ -22,7 +22,8 @@ Target shape:
 - [x] Register a test client and write down `client_id` / `client_secret` / redirect URI.
       Start with a local OP (see Slice 8), not Google.
 - [x] Config struct: issuer URL, client ID, client secret, redirect URI, scopes,
-      cookie signing key. Load from env; never commit the secret.
+      cookie signing key.
+- [ ] Load from env; never commit the secret.
 
 ## Slice 1 — discovery
 
@@ -31,8 +32,8 @@ Target shape:
       `jwks_uri`, `id_token_signing_alg_values_supported`, `scopes_supported`,
       `token_endpoint_auth_methods_supported`, `userinfo_endpoint`, `end_session_endpoint`.
 - [x] Verify the returned `issuer` matches the URL you asked. Mismatch = abort.
-- [x] Cache the document with a TTL. Refresh in the background, never block a login on it.
-- [x] Require HTTPS for the issuer, with a localhost/dev escape hatch.
+- [ ] Cache the document with a TTL. Refresh in the background, never block a login on it.
+- [ ] Require HTTPS for the issuer, with a localhost/dev escape hatch.
 
 ## Slice 2 — the authorization request
 
