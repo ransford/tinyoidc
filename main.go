@@ -7,7 +7,13 @@ import (
 func main() {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
 
-	if err := NewOidcRelyingParty(DEFAULT_PORT).ListenAndServe(); err != nil {
+	rp, err := NewOidcRelyingParty(DEFAULT_PORT)
+	if err != nil {
+		slog.Error("server error", "err", err)
+		return
+	}
+
+	if err := rp.ListenAndServe(); err != nil {
 		slog.Error("server error", "err", err)
 	}
 }
