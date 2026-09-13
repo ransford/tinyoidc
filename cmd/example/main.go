@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"log/slog"
@@ -40,13 +41,26 @@ func main() {
 	mux.Handle("/auth/", rp.Handler())
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		header(w, r)
-		fmt.Fprint(w, `<p>Public page.</p>`)
+		fmt.Fprint(w, `<p>Public page.</p>
+<p><button id="whoami">fetch /api/whoami</button> <code id="result"></code></p>
+<script>
+document.getElementById("whoami").onclick = async () => {
+	const resp = await fetch("/api/whoami");
+	document.getElementById("result").textContent = resp.status + " " + await resp.text();
+};
+</script>`)
 	})
 	mux.Handle("GET /private", rp.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header(w, r)
 		claims, _ := tinyoidc.ClaimsFromContext(r.Context())
 		fmt.Fprintf(w, "<p>Private page. iss=%s, sub=%s</p>",
 			html.EscapeString(claims.Issuer), html.EscapeString(claims.Subject))
+	})))
+
+	mux.Handle("GET /api/whoami", rp.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := tinyoidc.ClaimsFromContext(r.Context())
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"iss": claims.Issuer, "sub": claims.Subject, "email": claims.Email})
 	})))
 
 	srv := &http.Server{

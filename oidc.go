@@ -525,15 +525,45 @@ func (o *OidcRelyingParty) Handler() http.Handler {
 
 type claimsContextKey struct{}
 
+// isNavigation reports whether r is a browser loading a page, as opposed to fetch/XHR,
+// a subresource, or an API client. Only navigations should be sent through a login flow:
+// fetch() would silently follow the redirect to the OP's HTML and fail on CORS.
+func isNavigation(r *http.Request) bool {
+	// A redirected POST loses its body, so only GET and HEAD can resume after login.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	// Browsers set Sec-Fetch-* themselves and scripts can't forge it.
+	if mode := r.Header.Get("Sec-Fetch-Mode"); mode != "" {
+		return mode == "navigate" && r.Header.Get("Sec-Fetch-Dest") == "document"
+	}
+	// No Sec-Fetch-*: an older browser or a non-browser client. Only an explicit
+	// text/html counts; curl's default */* does not.
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
 // Middleware passes requests with a valid session through to next, with the
-// session's ID token claims in the request context. Everything else is
-// redirected to /auth/login.
+// session's ID token claims in the request context. Otherwise, navigations are
+// redirected to /auth/login and everything else gets a 401.
 func (o *OidcRelyingParty) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := o.Claims(r)
 		if !ok {
+			// The response depends on these headers, so caches must not share it.
+			w.Header().Add("Vary", "Sec-Fetch-Mode, Sec-Fetch-Dest, Accept")
+			w.Header().Set("Cache-Control", "no-store")
+
 			login := "/auth/login?" + url.Values{"next": {r.URL.RequestURI()}}.Encode()
-			http.Redirect(w, r, login, http.StatusFound)
+			if isNavigation(r) {
+				http.Redirect(w, r, login, http.StatusFound)
+				return
+			}
+			// 401 requires WWW-Authenticate, but cookie sessions have no registered
+			// scheme, so this one is made up.
+			w.Header().Set("WWW-Authenticate", `Session realm="tinyoidc"`)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "unauthenticated", "login": login})
 			return
 		}
 		ctx := context.WithValue(r.Context(), claimsContextKey{}, claims)

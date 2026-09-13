@@ -102,10 +102,10 @@ Target shape:
       `Path=/`, explicit `Max-Age`. Consider the `__Host-` prefix.
 - [x] `Middleware`: session present and valid → put claims in the request `Context` and call
       the next handler. Otherwise → stash the destination and redirect to `/auth/login`.
-- [ ] Only redirect to login for navigation requests. API/XHR requests should get a 401, not a
+- [x] Only redirect to login for navigation requests. API/XHR requests should get a 401, not a
       302 into Google's HTML.
-- [ ] Exported accessor for pulling the user out of a request context.
-- [ ] Redirect to the saved destination — re-validate that it's local before using it.
+- [x] Exported accessor for pulling the user out of a request context.
+- [x] Redirect to the saved destination — re-validate that it's local before using it.
 - [x] `/auth/logout`: clear the cookie, invalidate server-side state. Make it POST, or
       CSRF-protect it; a `<img src="/auth/logout">` on any page shouldn't log people out.
 
