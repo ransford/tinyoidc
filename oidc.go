@@ -529,20 +529,31 @@ type claimsContextKey struct{}
 // redirected to /auth/login.
 func (o *OidcRelyingParty) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var session *ActiveSession
-		if cookie, err := r.Cookie("__Host-tinyoidc_session"); err == nil {
-			o.mu.Lock()
-			session = o.activeSessions[cookie.Value]
-			o.mu.Unlock()
-		}
-		if session == nil || time.Now().After(session.claims.ExpiresAt.Time) {
+		claims, ok := o.Claims(r)
+		if !ok {
 			login := "/auth/login?" + url.Values{"next": {r.URL.RequestURI()}}.Encode()
 			http.Redirect(w, r, login, http.StatusFound)
 			return
 		}
-		ctx := context.WithValue(r.Context(), claimsContextKey{}, session.claims)
+		ctx := context.WithValue(r.Context(), claimsContextKey{}, claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// Claims returns the ID token claims for the request's session, if it has a valid
+// one. Unlike Middleware it never redirects, so public pages can use it too.
+func (o *OidcRelyingParty) Claims(r *http.Request) (*IDTokenClaims, bool) {
+	cookie, err := r.Cookie("__Host-tinyoidc_session")
+	if err != nil {
+		return nil, false
+	}
+	o.mu.Lock()
+	session := o.activeSessions[cookie.Value]
+	o.mu.Unlock()
+	if session == nil || time.Now().After(session.claims.ExpiresAt.Time) {
+		return nil, false
+	}
+	return session.claims, true
 }
 
 // ClaimsFromContext returns the claims Middleware stored in a request context.

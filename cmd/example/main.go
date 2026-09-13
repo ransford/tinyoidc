@@ -5,8 +5,10 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/ransford/tinyoidc"
@@ -21,15 +23,30 @@ func main() {
 		return
 	}
 
+	// header starts an HTML page with a one-line login status.
+	header := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<header><a href="/">Home</a> · <a href="/private">Private page</a> · `)
+		if claims, ok := rp.Claims(r); ok {
+			fmt.Fprintf(w, `Logged in as %s · <a href="/auth/logout">Log out</a>`, html.EscapeString(claims.Email))
+		} else {
+			login := "/auth/login?" + url.Values{"next": {r.URL.RequestURI()}}.Encode()
+			fmt.Fprintf(w, `Not logged in · <a href="%s">Log in</a>`, html.EscapeString(login))
+		}
+		fmt.Fprint(w, "</header><hr>\n")
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/auth/", rp.Handler())
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, `<p>Public page. <a href="/private">Private page</a> · <a href="/auth/logout">Log out</a></p>`)
+		header(w, r)
+		fmt.Fprint(w, `<p>Public page.</p>`)
 	})
 	mux.Handle("GET /private", rp.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header(w, r)
 		claims, _ := tinyoidc.ClaimsFromContext(r.Context())
-		fmt.Fprintf(w, "Hello, %s (iss=%s, sub=%s)\n", claims.Email, claims.Issuer, claims.Subject)
+		fmt.Fprintf(w, "<p>Private page. iss=%s, sub=%s</p>",
+			html.EscapeString(claims.Issuer), html.EscapeString(claims.Subject))
 	})))
 
 	srv := &http.Server{
