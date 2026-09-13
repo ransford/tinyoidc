@@ -151,11 +151,7 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 
 	params := r.URL.Query()
 	if params.Get("error") != "" {
-		slog.Error("callback error",
-			"error", params.Get("error"),
-			"error_description", params.Get("error_description"))
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`"error"`))
+		http.Error(w, params.Get("error"), http.StatusBadRequest)
 		return
 	}
 
@@ -163,15 +159,11 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	state := params.Get("state")
 	cookie, err := r.Cookie(STATE_COOKIE_NAME)
 	if err != nil {
-		slog.Error("callback error", "missing state cookie", state)
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`"error: tinyoidc_state cookie not found"`))
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if cookie.Value != state {
-		slog.Error("callback error", "mismatching state cookie", state)
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`"error: tinyoidc_state cookie mismatch"`))
+		http.Error(w, "mismatching state cookie", http.StatusBadRequest)
 		return
 	}
 
@@ -182,18 +174,14 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	}
 	o.mu.Unlock()
 	if !ok {
-		slog.Error("callback error", "missing state", state)
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`"error: state not found"`))
+		http.Error(w, "no such state", http.StatusBadRequest)
 		return
 	}
 	slog.Debug("found session", "state", state)
 
 	code := params.Get("code")
 	if code == "" {
-		slog.Error("callback error: missing code")
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`"error: missing code"`))
+		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
 
@@ -209,9 +197,7 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	fetchToken, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		o.fetchedOidcConfig.TokenEndpoint, formEncodedReader)
 	if err != nil {
-		slog.Error("callback error: post")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`"error: post"`))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	fetchToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -220,9 +206,7 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	client := &http.Client{}
 	resp, err := client.Do(fetchToken)
 	if err != nil || resp.StatusCode != http.StatusOK {
-		slog.Error("callback error: fetch token")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`"error: fetch token"`))
+		http.Error(w, "fetch error", http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
@@ -230,18 +214,14 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	// Do something with the access token
 	tokenResponse := TokenResponse{}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tokenResponse); err != nil {
-		slog.Error("callback error: parse token")
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`"error: parse token"`))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	slog.Debug("parsed access token", "expires", tokenResponse.ExpiresIn)
 
 	claims, err := o.verifyIDToken(tokenResponse.IdToken, session.Nonce)
 	if err != nil {
-		slog.Error("callback error: verify ID token", "err", err)
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`"error: invalid ID token"`))
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 	slog.Debug("JWT claims", "claims", claims)
