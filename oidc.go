@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const DEFAULT_PORT uint16 = 8192
@@ -50,11 +52,28 @@ type ClientCookie struct {
 	created time.Time
 }
 
-type AccessToken struct {
+type TokenResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"token_type"`
 	ExpiresIn   int64  `json:"expires_in"`
 	IdToken     string `json:"id_token"`
+}
+
+type Jwks struct {
+	Keys []struct {
+		Kty string `json:"kty"`
+		Kid string `json:"kid"`
+		N   string `json:"n"`
+		E   string `json:"e"`
+	} `json:"keys"`
+}
+
+type IDTokenClaims struct {
+	jwt.RegisteredClaims        // iss, sub, aud, exp, iat
+	Nonce                string `json:"nonce"`
+	Azp                  string `json:"azp"`
+	Email                string `json:"email"`
+	EmailVerified        bool   `json:"email_verified"`
 }
 
 func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Request) {
@@ -128,9 +147,7 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	fetchToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	fetchToken.SetBasicAuth(o.clientId, o.clientSecret)
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
+	client := &http.Client{}
 	resp, err := client.Do(fetchToken)
 	if err != nil {
 		slog.Error("callback error: fetch token")
@@ -159,14 +176,50 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	})
 
 	// Do something with the access token
-	accessToken := AccessToken{}
-	if err := json.Unmarshal(body, &accessToken); err != nil {
+	tokenResponse := TokenResponse{}
+	if err := json.Unmarshal(body, &tokenResponse); err != nil {
 		slog.Error("callback error: parse token")
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`"error: parse token"`))
 		return
 	}
-	slog.Debug("parsed access token", "expires", accessToken.ExpiresIn)
+	slog.Debug("parsed access token", "expires", tokenResponse.ExpiresIn)
+
+	// Get the JWKS URI
+	slog.Debug("fetching jwks", "jwks_uri", o.fetchedOidcConfig.JwksUri)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, o.fetchedOidcConfig.JwksUri, nil)
+	if err != nil {
+		slog.Error("callback error: jwks client init")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`"error: jwks client init"`))
+		return
+	}
+	resp2, err := client.Do(req)
+	if err != nil {
+		slog.Error("callback error: jwks fetch")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`"error: jwks fetch"`))
+		return
+	}
+	defer resp2.Body.Close()
+	body2, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		slog.Error("callback error: read jwks")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`"error: read jwks"`))
+		return
+	}
+	slog.Debug("jwks", "body", body2)
+	parsedJwks := Jwks{}
+	if err := json.Unmarshal(body2, &parsedJwks); err != nil {
+		slog.Error("callback error: parse jwks")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`"error: read parse"`))
+		return
+	}
+	slog.Debug("parsed jwks", "jwks", parsedJwks)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status": "got access token"}`))
@@ -271,7 +324,7 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		return nil, err
 	}
 
-	// Get OID configuration from SP
+	// Get OIDC configuration from SP
 	oidcConfigUrl := fmt.Sprintf("%s/.well-known/openid-configuration", DEV_ISSUER_URL)
 	slog.Info("fetching", "url", oidcConfigUrl)
 	resp, err := http.Get(oidcConfigUrl)
@@ -288,6 +341,8 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 	if conf.Issuer != DEV_ISSUER_URL {
 		return nil, fmt.Errorf("wrong issuer url")
 	}
+
+	// TODO: fetch JWKS URI once and populate a field in conf
 
 	rp := &OidcRelyingParty{
 		server:            srv,
