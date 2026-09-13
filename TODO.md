@@ -72,7 +72,7 @@ Target shape:
 ## Slice 4 — ID token verification (the important one)
 
 - [x] Fetch JWKS from `jwks_uri`; cache it.
-- [ ] On an unknown `kid`, re-fetch once — keys rotate — but rate-limit that path so a bogus
+- [x] On an unknown `kid`, re-fetch once — keys rotate — but rate-limit that path so a bogus
       token can't turn into a request flood.
 - [x] Select the key by `kid`. Choose the algorithm from the discovery document's supported
       list; **never** take direction from the token's own `alg` header. Reject `none` and

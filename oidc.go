@@ -40,9 +40,10 @@ type OidcRelyingParty struct {
 	cookieSigningKey []byte
 
 	fetchedOidcConfig *OpenIDConfig
-	jwks              *Jwks
 
 	mu              sync.Mutex
+	jwks            *Jwks
+	jwksFetched     time.Time // last JWKS fetch attempt, successful or not
 	pendingSessions map[string]*ClientCookie
 	activeSessions  map[string]*ActiveSession
 }
@@ -72,26 +73,45 @@ type TokenResponse struct {
 }
 
 type Jwks struct {
-	Keys []struct {
-		Kty string `json:"kty"`
-		Kid string `json:"kid"`
-		N   string `json:"n"`
-		E   string `json:"e"`
-	} `json:"keys"`
+	Keys []Jwk `json:"keys"`
 }
 
-type IDTokenClaims struct {
-	jwt.RegisteredClaims        // iss, sub, aud, exp, iat
-	Nonce                string `json:"nonce"`
-	Azp                  string `json:"azp"`
-	Email                string `json:"email"`
-	EmailVerified        bool   `json:"email_verified"`
+type Jwk struct {
+	Kty string `json:"kty"`
+	Kid string `json:"kid"`
+	N   string `json:"n"`
+	E   string `json:"e"`
 }
 
-// keyFor is the jwt.Keyfunc: choose the OP's public key by the token's kid.
-func (o *OidcRelyingParty) keyFor(t *jwt.Token) (any, error) {
-	kid, _ := t.Header["kid"].(string)
-	for _, k := range o.jwks.Keys {
+// jwksRefetchInterval rate-limits JWKS fetches triggered by unknown kids, so a stream
+// of tokens with bogus kids can't turn into a stream of requests to the OP.
+const jwksRefetchInterval = time.Minute
+
+func fetchJwks(uri string) (*Jwks, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch jwks: %s", resp.Status)
+	}
+	jwks := &Jwks{}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(jwks); err != nil {
+		return nil, err
+	}
+	return jwks, nil
+}
+
+// rsaKey returns the RSA key with the given kid, or nil if jwks has none.
+func (j *Jwks) rsaKey(kid string) (*rsa.PublicKey, error) {
+	for _, k := range j.Keys {
 		if k.Kid != kid || k.Kty != "RSA" {
 			continue
 		}
@@ -105,7 +125,51 @@ func (o *OidcRelyingParty) keyFor(t *jwt.Token) (any, error) {
 		}
 		return &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: int(new(big.Int).SetBytes(e).Int64())}, nil
 	}
-	return nil, fmt.Errorf("no key for kid %q", kid) // later: refetch JWKS once
+	return nil, nil
+}
+
+type IDTokenClaims struct {
+	jwt.RegisteredClaims        // iss, sub, aud, exp, iat
+	Nonce                string `json:"nonce"`
+	Azp                  string `json:"azp"`
+	Email                string `json:"email"`
+	EmailVerified        bool   `json:"email_verified"`
+}
+
+// keyFor is the jwt.Keyfunc: choose the OP's public key by the token's kid. An unknown
+// kid may mean the OP rotated its keys, so re-fetch the JWKS, at most once per
+// jwksRefetchInterval.
+func (o *OidcRelyingParty) keyFor(t *jwt.Token) (any, error) {
+	kid, _ := t.Header["kid"].(string)
+
+	o.mu.Lock()
+	// Rechecked on each call: another goroutine's re-fetch may have brought the key in.
+	if k, err := o.jwks.rsaKey(kid); k != nil || err != nil {
+		o.mu.Unlock()
+		return k, err
+	}
+	if time.Since(o.jwksFetched) < jwksRefetchInterval {
+		o.mu.Unlock()
+		return nil, fmt.Errorf("no key for kid %q", kid)
+	}
+	// Claim the fetch before unlocking so concurrent callers don't fetch too. The lock
+	// isn't held across the request: Claims takes it on every request.
+	o.jwksFetched = time.Now()
+	o.mu.Unlock()
+
+	slog.Info("unknown kid, re-fetching jwks", "kid", kid)
+	jwks, err := fetchJwks(o.fetchedOidcConfig.JwksUri)
+	if err != nil {
+		return nil, fmt.Errorf("no key for kid %q: %w", kid, err)
+	}
+	o.mu.Lock()
+	o.jwks = jwks
+	o.mu.Unlock()
+
+	if k, err := jwks.rsaKey(kid); k != nil || err != nil {
+		return k, err
+	}
+	return nil, fmt.Errorf("no key for kid %q", kid)
 }
 
 // verifyIDToken checks the ID token's signature and claims, and that its nonce is the
@@ -466,30 +530,12 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		return nil, fmt.Errorf("wrong issuer url")
 	}
 
-	// Get the JWKS URI
 	slog.Debug("fetching jwks", "jwks_uri", conf.JwksUri)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	client := &http.Client{}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, conf.JwksUri, nil)
+	jwks, err := fetchJwks(conf.JwksUri)
 	if err != nil {
 		return nil, err
 	}
-	resp2, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp2.Body.Close()
-	body, err := io.ReadAll(resp2.Body)
-	if err != nil {
-		return nil, err
-	}
-	slog.Debug("jwks", "body", body)
-	parsedJwks := Jwks{}
-	if err := json.Unmarshal(body, &parsedJwks); err != nil {
-		return nil, err
-	}
-	slog.Debug("parsed jwks", "jwks", parsedJwks)
+	slog.Debug("parsed jwks", "jwks", jwks)
 
 	rp := &OidcRelyingParty{
 		mux:               mux,
@@ -500,7 +546,8 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		scopes:            []string{"openid", "email"},
 		cookieSigningKey:  cookieSigningKey,
 		fetchedOidcConfig: &conf,
-		jwks:              &parsedJwks,
+		jwks:              jwks,
+		jwksFetched:       time.Now(),
 
 		pendingSessions: make(map[string]*ClientCookie),
 		activeSessions:  make(map[string]*ActiveSession),

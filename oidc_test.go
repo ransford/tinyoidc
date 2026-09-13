@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -27,15 +29,8 @@ func TestVerifyIDToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rp := &OidcRelyingParty{issuerUrl: testIssuer, clientId: testClient, jwks: &Jwks{}}
-	rp.jwks.Keys = append(rp.jwks.Keys, struct {
-		Kty string `json:"kty"`
-		Kid string `json:"kid"`
-		N   string `json:"n"`
-		E   string `json:"e"`
-	}{"RSA", testKid,
-		base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
-		base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes())})
+	rp := &OidcRelyingParty{issuerUrl: testIssuer, clientId: testClient,
+		jwks: &Jwks{Keys: []Jwk{jwkFor(testKid, key)}}, jwksFetched: time.Now()}
 
 	pubDER, _ := x509.MarshalPKIXPublicKey(&key.PublicKey)
 	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
@@ -100,6 +95,68 @@ func TestVerifyIDToken(t *testing.T) {
 			_, err := rp.verifyIDToken(tt.token, testNonce)
 			if (err == nil) != tt.ok {
 				t.Errorf("verifyIDToken: err = %v, want ok = %v", err, tt.ok)
+			}
+		})
+	}
+}
+
+func jwkFor(kid string, key *rsa.PrivateKey) Jwk {
+	return Jwk{Kty: "RSA", Kid: kid,
+		N: base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+		E: base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes())}
+}
+
+func TestKeyRefetch(t *testing.T) {
+	oldKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	newKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+
+	tests := []struct {
+		name        string
+		kid         string
+		key         *rsa.PrivateKey
+		lastFetch   time.Duration // how long ago the cached JWKS was fetched
+		ok          bool
+		wantFetches int // across 3 verifications
+	}{
+		{"known kid", "old", oldKey, time.Hour, true, 0},
+		{"rotated, cache stale", "new", newKey, time.Hour, true, 1},
+		{"rotated, cache fresh", "new", newKey, time.Second, false, 0},
+		{"bogus kid is rate-limited", "bogus", newKey, time.Hour, false, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetches := 0
+			op := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fetches++
+				json.NewEncoder(w).Encode(Jwks{Keys: []Jwk{jwkFor("new", newKey)}})
+			}))
+			defer op.Close()
+
+			rp := &OidcRelyingParty{issuerUrl: testIssuer, clientId: testClient,
+				fetchedOidcConfig: &OpenIDConfig{JwksUri: op.URL},
+				jwks:              &Jwks{Keys: []Jwk{jwkFor("old", oldKey)}},
+				jwksFetched:       time.Now().Add(-tt.lastFetch)}
+
+			now := time.Now()
+			tok := jwt.NewWithClaims(jwt.SigningMethodRS256, &IDTokenClaims{
+				RegisteredClaims: jwt.RegisteredClaims{Issuer: testIssuer, Subject: "alice",
+					Audience: jwt.ClaimStrings{testClient}, IssuedAt: jwt.NewNumericDate(now),
+					ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour))},
+				Nonce: testNonce,
+			})
+			tok.Header["kid"] = tt.kid
+			raw, err := tok.SignedString(tt.key)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for range 3 {
+				if _, err := rp.verifyIDToken(raw, testNonce); (err == nil) != tt.ok {
+					t.Errorf("verifyIDToken: err = %v, want ok = %v", err, tt.ok)
+				}
+			}
+			if fetches != tt.wantFetches {
+				t.Errorf("fetches = %d, want %d", fetches, tt.wantFetches)
 			}
 		})
 	}
