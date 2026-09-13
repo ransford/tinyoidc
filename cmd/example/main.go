@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/ransford/tinyoidc"
+	tinyoidc "github.com/ransford/tinyoidc/internal/oidc"
 )
 
 func main() {
