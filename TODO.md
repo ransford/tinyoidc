@@ -106,7 +106,7 @@ Target shape:
       302 into Google's HTML.
 - [ ] Exported accessor for pulling the user out of a request context.
 - [ ] Redirect to the saved destination — re-validate that it's local before using it.
-- [ ] `/auth/logout`: clear the cookie, invalidate server-side state. Make it POST, or
+- [x] `/auth/logout`: clear the cookie, invalidate server-side state. Make it POST, or
       CSRF-protect it; a `<img src="/auth/logout">` on any page shouldn't log people out.
 
 ## Slice 6 — end-to-end test harness

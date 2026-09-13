@@ -288,6 +288,49 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	w.Write([]byte(fmt.Sprintf(`{"status": "logged in", "email": "%s"}`, claims.Email)))
 }
 
+func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request) {
+	// TODO: make this be POST or CSRF protected
+
+	var sessionId string
+
+	cookie, err := r.Cookie("__Host-tinyoidc_session")
+	if err != nil {
+		slog.Error("logout: invalid session")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	sessionId = cookie.Value
+
+	logout := false
+	var u string
+	var dur time.Duration
+
+	o.mu.Lock()
+	if s, ok := o.activeSessions[sessionId]; ok {
+		logout = true
+		u = s.Username
+		dur = time.Since(s.created)
+	}
+	delete(o.activeSessions, sessionId)
+	o.mu.Unlock()
+	if !logout {
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "__Host-tinyoidc_session",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+		HttpOnly: true,
+		Secure:   true,
+	})
+
+	slog.Info("logout", "username", u, "after", dur)
+	w.WriteHeader(http.StatusOK)
+}
+
 func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) {
 	// Log in
 	w.Header().Set("Content-Type", "application/json")
@@ -445,7 +488,8 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 		activeSessions:  make(map[string]*ActiveSession),
 	}
 
-	mux.Handle("/login", http.HandlerFunc(rp.loginHandler))
+	mux.Handle("/auth/login", http.HandlerFunc(rp.loginHandler))
+	mux.Handle("/auth/logout", http.HandlerFunc(rp.logoutHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(rp.authCallbackHandler))
 
 	// clean up old sessions
