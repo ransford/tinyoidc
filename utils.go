@@ -49,7 +49,7 @@ func getWithTimeout(uri string, timeout time.Duration) (*http.Response, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, fmt.Errorf("fetch jwks: %s", resp.Status)
+		return nil, fmt.Errorf("GET %s: %s", uri, resp.Status)
 	}
 	return resp, nil
 }

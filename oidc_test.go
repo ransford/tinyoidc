@@ -161,3 +161,45 @@ func TestKeyRefetch(t *testing.T) {
 		})
 	}
 }
+
+func TestTidy(t *testing.T) {
+	now := time.Now()
+	session := func(exp time.Time) *ActiveSession {
+		return &ActiveSession{claims: &IDTokenClaims{
+			RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(exp)}}}
+	}
+	rp := &OidcRelyingParty{
+		pendingSessions: map[string]*ClientCookie{
+			"fresh": {created: now},
+			"stale": {created: now.Add(-11 * time.Minute)},
+		},
+		activeSessions: map[string]*ActiveSession{
+			"live":    session(now.Add(time.Hour)),
+			"expired": session(now.Add(-time.Hour)),
+		},
+	}
+	rp.tidy()
+	if _, ok := rp.pendingSessions["fresh"]; !ok || len(rp.pendingSessions) != 1 {
+		t.Errorf("pendingSessions = %v, want only fresh", rp.pendingSessions)
+	}
+	if _, ok := rp.activeSessions["live"]; !ok || len(rp.activeSessions) != 1 {
+		t.Errorf("activeSessions = %v, want only live", rp.activeSessions)
+	}
+}
+
+func TestClose(t *testing.T) {
+	rp := &OidcRelyingParty{stop: make(chan struct{}), tidyDone: make(chan struct{})}
+	go rp.tidyLoop()
+
+	done := make(chan struct{})
+	go func() {
+		rp.Close()
+		rp.Close() // a second Close must not panic or block
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return")
+	}
+}

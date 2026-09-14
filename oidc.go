@@ -45,6 +45,10 @@ type OidcRelyingParty struct {
 	// Storage for pending and active sessions
 	pendingSessions map[string]*ClientCookie
 	activeSessions  map[string]*ActiveSession
+
+	stop     chan struct{} // closed by Close to stop tidyLoop
+	stopOnce sync.Once
+	tidyDone chan struct{} // closed when tidyLoop exits
 }
 
 type ClientCookie struct {
@@ -377,25 +381,43 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, baseUrl.String(), http.StatusFound)
 }
 
-func (o *OidcRelyingParty) tidyForever() {
+// tidyLoop removes expired pending and active sessions once a minute until Close is
+// called.
+func (o *OidcRelyingParty) tidyLoop() {
+	defer close(o.tidyDone)
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
 	for {
-		o.mu.Lock()
-
-		for s, c := range o.pendingSessions {
-			if time.Since(c.created) > 10*time.Minute {
-				delete(o.pendingSessions, s)
-			}
+		select {
+		case <-o.stop:
+			return
+		case <-t.C:
+			o.tidy()
 		}
-
-		for s, c := range o.activeSessions {
-			if time.Now().After(c.claims.ExpiresAt.Time) {
-				delete(o.activeSessions, s)
-			}
-		}
-
-		o.mu.Unlock()
-		time.Sleep(1 * time.Minute)
 	}
+}
+
+func (o *OidcRelyingParty) tidy() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for s, c := range o.pendingSessions {
+		if time.Since(c.created) > 10*time.Minute {
+			delete(o.pendingSessions, s)
+		}
+	}
+	for s, c := range o.activeSessions {
+		if time.Now().After(c.claims.ExpiresAt.Time) {
+			delete(o.activeSessions, s)
+		}
+	}
+}
+
+// Close stops the background session cleanup and waits for it to exit. The handlers
+// keep working, but expired sessions are no longer removed. Close is safe to call
+// more than once.
+func (o *OidcRelyingParty) Close() {
+	o.stopOnce.Do(func() { close(o.stop) })
+	<-o.tidyDone
 }
 
 func fetchOidcConfig(uri string) (*OpenIDConfig, error) {
@@ -453,14 +475,16 @@ func NewOidcRelyingParty(port uint16) (*OidcRelyingParty, error) {
 
 		pendingSessions: make(map[string]*ClientCookie),
 		activeSessions:  make(map[string]*ActiveSession),
+
+		stop:     make(chan struct{}),
+		tidyDone: make(chan struct{}),
 	}
 
 	mux.Handle("/auth/login", http.HandlerFunc(rp.loginHandler))
 	mux.Handle("POST /auth/logout", http.HandlerFunc(rp.logoutHandler))
 	mux.Handle("/auth/callback", http.HandlerFunc(rp.authCallbackHandler))
 
-	// clean up old sessions
-	go rp.tidyForever()
+	go rp.tidyLoop()
 
 	return rp, nil
 }
