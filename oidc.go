@@ -147,8 +147,6 @@ func (o *OidcRelyingParty) verifyIDToken(raw, nonce string) (*IDTokenClaims, err
 }
 
 func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
 	params := r.URL.Query()
 	if params.Get("error") != "" {
 		http.Error(w, params.Get("error"), http.StatusBadRequest)
@@ -177,7 +175,6 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		http.Error(w, "no such state", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("found session", "state", state)
 
 	code := params.Get("code")
 	if code == "" {
@@ -202,13 +199,17 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 	fetchToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	fetchToken.SetBasicAuth(o.clientId, o.clientSecret)
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(fetchToken)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		http.Error(w, "fetch error", http.StatusInternalServerError)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "fetch error", http.StatusInternalServerError)
+		return
+	}
 
 	// Do something with the access token
 	tokenResponse := TokenResponse{}
@@ -343,7 +344,6 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	o.mu.Lock()
 	o.pendingSessions[stateStr] = &cookieVal
-	slog.Debug("wrote session", "key", stateStr)
 	o.mu.Unlock()
 
 	cookie := http.Cookie{
@@ -373,7 +373,6 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 	params.Add("code_challenge_method", "S256")
 	params.Add("code_challenge", codeChallenge)
 	baseUrl.RawQuery = params.Encode()
-	slog.Debug("redirecting", "location", baseUrl.String())
 
 	http.Redirect(w, r, baseUrl.String(), http.StatusFound)
 }
@@ -382,30 +381,19 @@ func (o *OidcRelyingParty) tidyForever() {
 	for {
 		o.mu.Lock()
 
-		pDeletions := []string{}
 		for s, c := range o.pendingSessions {
 			if time.Since(c.created) > 10*time.Minute {
-				pDeletions = append(pDeletions, s)
+				delete(o.pendingSessions, s)
 			}
-		}
-		for _, d := range pDeletions {
-			delete(o.pendingSessions, d)
 		}
 
-		sDeletions := []string{}
 		for s, c := range o.activeSessions {
 			if time.Now().After(c.claims.ExpiresAt.Time) {
-				sDeletions = append(sDeletions, s)
+				delete(o.activeSessions, s)
 			}
-		}
-		for _, d := range sDeletions {
-			delete(o.activeSessions, d)
 		}
 
 		o.mu.Unlock()
-		slog.Debug("tidied",
-			"pending_sessions", len(pDeletions),
-			"active_sessions", len(sDeletions))
 		time.Sleep(1 * time.Minute)
 	}
 }

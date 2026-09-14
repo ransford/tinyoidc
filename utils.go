@@ -1,7 +1,6 @@
 package tinyoidc
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -43,13 +42,8 @@ func isNavigation(r *http.Request) bool {
 }
 
 func getWithTimeout(uri string, timeout time.Duration) (*http.Response, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(uri)
 	if err != nil {
 		return nil, err
 	}
