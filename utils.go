@@ -2,6 +2,7 @@ package tinyoidc
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -39,6 +40,48 @@ func isNavigation(r *http.Request) bool {
 	// No Sec-Fetch-*: an older browser or a non-browser client. Only an explicit
 	// text/html counts; curl's default */* does not.
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// validateEndpoint reports whether raw is a URL we're willing to send requests — and,
+// for the token endpoint, the client_secret — to. It must be absolute and https, with
+// an escape hatch for plaintext loopback so a local test OP like Dex works.
+//
+// Deliberately no check that the endpoint shares the issuer's origin: real OPs split
+// them across hosts. Google's issuer is accounts.google.com while its token endpoint
+// is oauth2.googleapis.com.
+func validateEndpoint(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Host == "" {
+		return fmt.Errorf("not an absolute URL: %q", raw)
+	}
+	// Credentials in the URL would be sent to the OP and logged along the way.
+	if u.User != nil {
+		return fmt.Errorf("URL carries userinfo")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("plaintext http is only allowed for loopback, got %q", u.Host)
+	default:
+		return fmt.Errorf("scheme %q is not http(s)", u.Scheme)
+	}
+}
+
+// isLoopbackHost reports whether host names this machine, and so whether plaintext
+// traffic to it stays off the network.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func getWithTimeout(uri string, timeout time.Duration) (*http.Response, error) {

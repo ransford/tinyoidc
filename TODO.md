@@ -33,7 +33,11 @@ Target shape:
       `token_endpoint_auth_methods_supported`, `userinfo_endpoint`, `end_session_endpoint`.
 - [x] Verify the returned `issuer` matches the URL you asked. Mismatch = abort.
 - [ ] Cache the document with a TTL. Refresh in the background, never block a login on it.
-- [ ] Require HTTPS for the issuer, with a localhost/dev escape hatch.
+- [x] Require HTTPS for the issuer, with a localhost/dev escape hatch. Applied to
+      `authorization_endpoint`, `token_endpoint` and `jwks_uri` too: `url.Parse` alone
+      accepts almost anything, and the `client_secret` goes to `token_endpoint`.
+      Deliberately *not* requiring the endpoints to share the issuer's origin — Google's
+      issuer is `accounts.google.com` but its token endpoint is `oauth2.googleapis.com`.
 
 ## Slice 2 — the authorization request
 
@@ -46,6 +50,10 @@ Target shape:
 - [x] Bind the pending entry to the browser (short-lived cookie holding the state value, or a
       signed cookie carrying the whole entry). An unbound `state` is not a CSRF defense.
 - [x] Expire pending entries after ~10 minutes; sweep on a ticker.
+- [x] Cap the pending store. `/auth/login` is unauthenticated, so without a cap anyone can
+      grow the map until the process dies, and the sweep holds the mutex the handlers need.
+      Shed load at the cap rather than evicting: evicting lets an attacker break other
+      people's logins on demand.
 - [x] Validate `next` before storing it: must be a relative path on this site. This is where
       open redirects come from.
 - [x] Build the redirect URL: `response_type=code`, `client_id`, `redirect_uri` (exact

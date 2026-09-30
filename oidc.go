@@ -27,6 +27,12 @@ const DEV_CLIENT_SECRET = "tinyoidc-dev-secret"
 const STATE_COOKIE_NAME = "__Host-tinyoidc_state"
 const SESSION_COOKIE_NAME = "__Host-tinyoidc_session"
 
+// maxPendingSessions caps the pending-auth store. /auth/login is unauthenticated, and
+// every call adds an entry that lives until it's used or swept ~10 minutes later, so
+// without a cap anyone can grow the map until the process runs out of memory. The cap
+// also bounds how long tidy holds the mutex, since the sweep blocks every handler.
+const maxPendingSessions = 10000
+
 type OidcRelyingParty struct {
 	mux *http.ServeMux
 
@@ -46,6 +52,11 @@ type OidcRelyingParty struct {
 	pendingSessions map[string]*ClientCookie
 	activeSessions  map[string]*ActiveSession
 
+	// Last time we complained about a full pending store. Refusals come one per
+	// request during a flood, and a log line each would just move the exhaustion
+	// from memory to the disk.
+	pendingFullLogged time.Time
+
 	stop     chan struct{} // closed by Close to stop tidyLoop
 	stopOnce sync.Once
 	tidyDone chan struct{} // closed when tidyLoop exits
@@ -63,8 +74,17 @@ type ClientCookie struct {
 }
 
 type ActiveSession struct {
+	// Issuer and Subject are the identity key (OIDC Core §2: `sub` is unique only
+	// within an issuer). Both are always non-empty: verifyIDToken rejects a token
+	// missing either one.
+	Issuer  string
+	Subject string
+
+	// Username is for display only, and is empty when the OP returned no verified
+	// email. Never key authorization off it: every such user would share "".
 	Username string
-	claims   *IDTokenClaims
+
+	claims *IDTokenClaims
 
 	created time.Time
 }
@@ -89,6 +109,11 @@ type IDTokenClaims struct {
 // jwksRefetchInterval.
 func (o *OidcRelyingParty) keyFor(t *jwt.Token) (any, error) {
 	kid, _ := t.Header["kid"].(string)
+	// Without this, a token carrying no kid would search the JWKS for "" and match
+	// any key whose kid is also absent.
+	if kid == "" {
+		return nil, fmt.Errorf("token has no kid")
+	}
 
 	o.mu.Lock()
 	// Rechecked on each call: another goroutine's re-fetch may have brought the key in.
@@ -138,9 +163,16 @@ func (o *OidcRelyingParty) verifyIDToken(raw, nonce string) (*IDTokenClaims, err
 	if claims.Nonce != nonce {
 		return nil, fmt.Errorf("nonce mismatch")
 	}
-	if len(claims.Audience) > 1 && claims.Azp != o.clientId {
+	// OIDC Core §3.1.3.7: azp must equal the client_id whenever it is present, not
+	// only when there are multiple audiences. It is required when there are.
+	if claims.Azp != "" && claims.Azp != o.clientId {
 		return nil, fmt.Errorf("azp mismatch")
 	}
+	if len(claims.Audience) > 1 && claims.Azp != o.clientId {
+		return nil, fmt.Errorf("azp missing with multiple audiences")
+	}
+	// Half the identity key. The other half, iss, jwt.WithIssuer already pinned to
+	// o.issuerUrl.
 	if claims.Subject == "" {
 		return nil, fmt.Errorf("empty subject")
 	}
@@ -150,7 +182,27 @@ func (o *OidcRelyingParty) verifyIDToken(raw, nonce string) (*IDTokenClaims, err
 	return claims, nil
 }
 
+// clearCookie expires a cookie in the client. The attributes have to match the ones it
+// was set with, or the browser treats it as a different cookie and keeps the original.
+func clearCookie(w http.ResponseWriter, name string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
 func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Request) {
+	// This response carries Set-Cookie and depends on the request's cookies, so no
+	// cache may keep a copy. 3xx responses aren't heuristically cacheable, but say
+	// it rather than rely on that.
+	w.Header().Set("Cache-Control", "no-store")
+
 	params := r.URL.Query()
 	if params.Get("error") != "" {
 		http.Error(w, params.Get("error"), http.StatusBadRequest)
@@ -229,22 +281,16 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	slog.Info("logged in", "email", claims.Email)
+	slog.Info("logged in", "iss", claims.Issuer, "sub", claims.Subject, "email", claims.Email)
 
 	// Delete the state cookie so it can't be reused
-	http.SetCookie(w, &http.Cookie{
-		Name:     STATE_COOKIE_NAME,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		Expires:  time.Unix(0, 0),
-		HttpOnly: true,
-		Secure:   true,
-	})
+	clearCookie(w, STATE_COOKIE_NAME)
 
 	sessionId := uuid.New().String()
 	o.mu.Lock()
 	o.activeSessions[sessionId] = &ActiveSession{
+		Issuer:   claims.Issuer,
+		Subject:  claims.Subject,
 		Username: claims.Email,
 		claims:   claims,
 		created:  time.Now(),
@@ -272,7 +318,13 @@ func (o *OidcRelyingParty) authCallbackHandler(w http.ResponseWriter, r *http.Re
 // logoutHandler is registered for POST only, so a cross-site <img> or link can't log
 // anyone out. A cross-site form POST won't carry the SameSite=Lax session cookie.
 func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request) {
-	var sessionId string
+	w.Header().Set("Cache-Control", "no-store")
+
+	// Clear both cookies unconditionally: a caller logging out with a session we
+	// don't recognize should still leave with a clean browser. A login abandoned
+	// part-way through leaves a state cookie behind.
+	clearCookie(w, SESSION_COOKIE_NAME)
+	clearCookie(w, STATE_COOKIE_NAME)
 
 	cookie, err := r.Cookie(SESSION_COOKIE_NAME)
 	if err != nil {
@@ -280,48 +332,31 @@ func (o *OidcRelyingParty) logoutHandler(w http.ResponseWriter, r *http.Request)
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	sessionId = cookie.Value
-
-	logout := false
-	var u string
-	var dur time.Duration
 
 	o.mu.Lock()
-	if s, ok := o.activeSessions[sessionId]; ok {
-		logout = true
-		u = s.Username
-		dur = time.Since(s.created)
-	}
-	delete(o.activeSessions, sessionId)
+	s, ok := o.activeSessions[cookie.Value]
+	delete(o.activeSessions, cookie.Value)
 	o.mu.Unlock()
-	if !logout {
+	if !ok {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     SESSION_COOKIE_NAME,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		Expires:  time.Unix(0, 0),
-		HttpOnly: true,
-		Secure:   true,
-	})
-
-	slog.Info("logout", "username", u, "after", dur)
+	slog.Info("logout", "iss", s.Issuer, "sub", s.Subject, "after", time.Since(s.created))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) {
-	// Log in
-	w.Header().Set("Content-Type", "application/json")
+	// This response sets the state cookie, so no cache may keep a copy.
+	w.Header().Set("Cache-Control", "no-store")
 
 	next := r.URL.Query().Get("next")
 	if !isLocalPath(next) {
 		next = "/"
 	}
 
+	// rand.Read never returns an error: since Go 1.24 it panics rather than hand
+	// back short or predictable output, so there is no failure to check for here.
 	state := make([]byte, 32)
 	rand.Read(state)
 	nonce := make([]byte, 32)
@@ -347,8 +382,26 @@ func (o *OidcRelyingParty) loginHandler(w http.ResponseWriter, r *http.Request) 
 		created: time.Now(),
 	}
 	o.mu.Lock()
-	o.pendingSessions[stateStr] = &cookieVal
+	full := len(o.pendingSessions) >= maxPendingSessions
+	shouldLog := false
+	if full {
+		if shouldLog = time.Since(o.pendingFullLogged) >= time.Minute; shouldLog {
+			o.pendingFullLogged = time.Now()
+		}
+	} else {
+		o.pendingSessions[stateStr] = &cookieVal
+	}
 	o.mu.Unlock()
+	if full {
+		// Shedding load is the right answer: the alternative, evicting someone
+		// else's entry, lets an attacker break other users' logins at will.
+		if shouldLog {
+			slog.Error("pending session store full, refusing logins",
+				"limit", maxPendingSessions)
+		}
+		http.Error(w, "too many logins in progress", http.StatusServiceUnavailable)
+		return
+	}
 
 	cookie := http.Cookie{
 		Name:     STATE_COOKIE_NAME,
@@ -435,11 +488,21 @@ func fetchOidcConfig(uri string) (*OpenIDConfig, error) {
 	if conf.Issuer != DEV_ISSUER_URL {
 		return nil, fmt.Errorf("wrong issuer url")
 	}
-	if _, err := url.Parse(conf.AuthorizationEndpoint); err != nil {
-		return nil, fmt.Errorf("invalid authz endpoint URL")
+	// These URLs come from a document we just downloaded, and we send the
+	// client_secret to token_endpoint. url.Parse alone accepts nearly anything, so
+	// it has to be checked properly.
+	endpoints := map[string]string{
+		// Redundant while the issuer is a hardcoded constant, but it stops the
+		// check from quietly going missing once the issuer is configurable.
+		"issuer":                 conf.Issuer,
+		"authorization_endpoint": conf.AuthorizationEndpoint,
+		"token_endpoint":         conf.TokenEndpoint,
+		"jwks_uri":               conf.JwksUri,
 	}
-	if _, err := url.Parse(conf.TokenEndpoint); err != nil {
-		return nil, fmt.Errorf("invalid token endpoint URL")
+	for name, raw := range endpoints {
+		if err := validateEndpoint(raw); err != nil {
+			return nil, fmt.Errorf("invalid %s: %w", name, err)
+		}
 	}
 
 	return &conf, nil

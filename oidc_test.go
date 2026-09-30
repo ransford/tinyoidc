@@ -1,6 +1,7 @@
 package tinyoidc
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -89,6 +90,18 @@ func TestVerifyIDToken(t *testing.T) {
 		{"unknown kid", sign(jwt.SigningMethodRS256, key, "nope", claims(nil)), false},
 		{"tampered payload", tampered(), false},
 		{"missing sub", rs256(func(c *IDTokenClaims) { c.Subject = "" }), false},
+		{"azp mismatch with single aud", rs256(func(c *IDTokenClaims) { c.Azp = "someone-else" }), false},
+		{"azp matching client id", rs256(func(c *IDTokenClaims) { c.Azp = testClient }), true},
+		{"multi aud with azp", rs256(func(c *IDTokenClaims) {
+			c.Audience = append(c.Audience, "someone-else")
+			c.Azp = testClient
+		}), true},
+		{"unverified email", rs256(func(c *IDTokenClaims) { c.Email = "alice@example.com" }), false},
+		{"verified email", rs256(func(c *IDTokenClaims) {
+			c.Email = "alice@example.com"
+			c.EmailVerified = true
+		}), true},
+		{"no kid", sign(jwt.SigningMethodRS256, key, "", claims(nil)), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -201,5 +214,102 @@ func TestClose(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Close did not return")
+	}
+}
+
+func TestRsaKey(t *testing.T) {
+	strong, _ := rsa.GenerateKey(rand.Reader, 2048)
+	weak, _ := rsa.GenerateKey(rand.Reader, 1024)
+
+	jwks := &Jwks{Keys: []Jwk{
+		jwkFor("strong", strong),
+		jwkFor("weak", weak),
+		// A key the OP published without a kid.
+		jwkFor("", strong),
+		// An exponent too wide for an int, which Int64 would silently truncate
+		// into some other, wrong, exponent.
+		{Kty: "RSA", Kid: "huge-e", N: jwkFor("strong", strong).N,
+			E: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xff}, 16))},
+		// An exponent Go's rsa package would reject anyway.
+		{Kty: "RSA", Kid: "zero-e", N: jwkFor("strong", strong).N,
+			E: base64.RawURLEncoding.EncodeToString([]byte{0})},
+	}}
+
+	tests := []struct {
+		name    string
+		kid     string
+		wantKey bool
+		wantErr bool
+	}{
+		{"known kid", "strong", true, false},
+		{"unknown kid is not an error", "nope", false, false},
+		{"short modulus rejected", "weak", false, true},
+		{"empty kid never matches", "", false, false},
+		{"oversized exponent rejected", "huge-e", false, true},
+		{"zero exponent rejected", "zero-e", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			k, err := jwks.rsaKey(tt.kid)
+			if (k != nil) != tt.wantKey || (err != nil) != tt.wantErr {
+				t.Errorf("rsaKey(%q) = %v, %v; want key = %v, err = %v",
+					tt.kid, k, err, tt.wantKey, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateEndpoint(t *testing.T) {
+	tests := []struct {
+		raw string
+		ok  bool
+	}{
+		{"https://op.example/token", true},
+		{"https://op.example:8443/token", true},
+		{"http://localhost:5556/dex/token", true},
+		{"http://127.0.0.1:5556/token", true},
+		{"http://[::1]:5556/token", true},
+		{"http://op.example/token", false}, // plaintext off-host
+		{"http://127.0.0.1.evil.example/", false},
+		{"https://user:pw@op.example/token", false},
+		{"ftp://op.example/token", false},
+		{"file:///etc/passwd", false},
+		{"/token", false}, // relative
+		{"", false},
+		{"://nonsense", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			if err := validateEndpoint(tt.raw); (err == nil) != tt.ok {
+				t.Errorf("validateEndpoint(%q) = %v, want ok = %v", tt.raw, err, tt.ok)
+			}
+		})
+	}
+}
+
+// TestLoginHandlerPendingCap checks that an unauthenticated flood of /auth/login can't
+// grow the pending store without bound.
+func TestLoginHandlerPendingCap(t *testing.T) {
+	rp := &OidcRelyingParty{
+		clientId:          testClient,
+		fetchedOidcConfig: &OpenIDConfig{AuthorizationEndpoint: "https://op.example/authorize"},
+		pendingSessions:   make(map[string]*ClientCookie),
+		activeSessions:    make(map[string]*ActiveSession),
+	}
+	for i := range maxPendingSessions {
+		w := httptest.NewRecorder()
+		rp.loginHandler(w, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+		if w.Code != http.StatusFound {
+			t.Fatalf("login %d: status = %d, want %d", i, w.Code, http.StatusFound)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	rp.loginHandler(w, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("login past the cap: status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	if n := len(rp.pendingSessions); n != maxPendingSessions {
+		t.Errorf("pendingSessions = %d, want %d", n, maxPendingSessions)
 	}
 }
