@@ -1,5 +1,9 @@
 # OIDC
 
+tinyoidc implements an OIDC *relying party* and just enough HTTP middleware to exercise it. It was written for, and is not suitable for anything but, educational purposes.
+
+Its intention is to be well commented and easy to understand.
+
 ## Relying Party (RP)
 
 Suppose OP == Google. As the RP, we've pre-registered with the OP and received a `client_id` and `client_secret`. We also registered our exact `redirect_uri`; the OP only sends codes to allowlisted URIs (exact string match; Google allows `http://` only for localhost).
